@@ -115,10 +115,17 @@ def main(argv=None) -> int:
 
     started = time.perf_counter()
 
-    def progress(done: int, total: int) -> None:
-        if done % 250 == 0:
-            pct = done / total * 100 if total else 0
-            sys.stdout.write(f"\r  {done}/{total} evaluations ({pct:.0f}%)")
+    # The engine reports a single 0..1 fraction, not (done, total).
+    state = {"last": -1}
+
+    def progress(fraction: float) -> None:
+        pct = int(fraction * 100)
+        if pct != state["last"]:
+            state["last"] = pct
+            elapsed = time.perf_counter() - started
+            eta = (elapsed / fraction - elapsed) if fraction > 0.01 else 0
+            sys.stdout.write(f"\r  {pct:3d}%  elapsed {elapsed:5.0f}s  "
+                             f"remaining ~{eta:5.0f}s")
             sys.stdout.flush()
 
     stats = engine.run(frames, profile,
@@ -144,20 +151,34 @@ def main(argv=None) -> int:
 
 def _report(stats: dict) -> None:
     """Print the figures, with the honesty checks beside them."""
-    summary = stats.get("summary", stats)
 
     def show(label, key, fmt="{}"):
-        if key in summary and summary[key] is not None:
-            print(f"  {label:26} {fmt.format(summary[key])}")
+        value = stats.get(key)
+        if value is not None:
+            print(f"  {label:26} {fmt.format(value)}")
 
     print("RESULTS")
-    show("Setups", "setups")
-    show("Trades", "trades_taken")
-    show("Win rate", "win_rate", "{:.1f}%")
-    show("Average R", "avg_r", "{:+.3f}")
-    show("Total R", "total_r", "{:+.2f}")
-    show("Profit factor", "profit_factor", "{:.2f}")
-    show("Max drawdown R", "max_drawdown_r", "{:.2f}")
+    for label, key, fmt in (
+            ("Trades", "trades", "{}"),
+            ("Wins", "wins", "{}"),
+            ("Losses", "losses", "{}"),
+            ("Win rate", "win_rate", "{:.1f}%"),
+            ("Average R", "avg_r", "{:+.3f}"),
+            ("Total R", "total_r", "{:+.2f}"),
+            ("Total pips", "total_pips", "{:+.1f}"),
+            ("Profit factor", "profit_factor", "{:.2f}"),
+            ("Max drawdown R", "max_drawdown_r", "{:.2f}")):
+        show(label, key, fmt)
+
+    by_strategy = stats.get("by_strategy") or {}
+    if by_strategy:
+        print("\nBY STRATEGY")
+        rows = sorted(by_strategy.items(),
+                      key=lambda kv: -(kv[1].get("n") or 0))
+        for name, row in rows[:15]:
+            print(f"  {str(name)[:26]:26} n={row.get('n', 0):>4}  "
+                  f"R={row.get('total_r', 0):+7.2f}  "
+                  f"win={row.get('win_rate', 0):5.1f}%")
 
     print("\nHONESTY CHECKS")
     print(f"  {'Evaluations':26} {stats.get('evaluations', '?')}")
@@ -165,7 +186,16 @@ def _report(stats: dict) -> None:
           f"(a wide stride under-fills: arming needs a confirmation seen at an "
           f"evaluation instant)")
     print(f"  {'Unfilled setups':26} {stats.get('unfilled_setups', '?')}")
-    print(f"  {'Transaction costs':26} NOT MODELLED -- every figure above is gross")
+    print(f"  {'Skipped steps':26} {stats.get('skipped_steps', '?')}")
+    dist = stats.get("score_distribution") or {}
+    if dist:
+        print(f"  {'Score distribution':26} {dist}")
+    waits = stats.get("wait_reasons") or {}
+    if waits:
+        print("\n  Why the engine waited:")
+        for reason, count in list(waits.items())[:6]:
+            print(f"    {count:>6}  {reason}")
+    print(f"\n  {'Transaction costs':26} NOT MODELLED -- every figure above is gross")
 
 
 if __name__ == "__main__":

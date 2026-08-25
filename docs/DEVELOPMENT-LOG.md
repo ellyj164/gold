@@ -552,3 +552,131 @@ longer anywhere on the live board.
 6. **Test the artefact the user actually runs** — the windowed binary, not the
    convenient one.
 7. **When a number looks impressive, check what produced it** before reporting it.
+
+---
+
+## v1.2.0 — measurement, participation, and pricing the entry (2026-08-25)
+
+Seven pieces of work, driven by an audit that put the project at 55/100:
+strong engineering (~80), weak validation (~30). The engineering was ahead of
+the evidence, and nothing here adds a feature that does not either close that
+gap or fill a genuine blind spot.
+
+### The look-ahead fault, and why the obvious fix was wrong
+
+The backtester sliced history with `df.index <= now`. The first diagnosis was
+that this should be `<`. **That is also wrong**, and the distinction matters
+more than the bug: MetaTrader labels a candle with the moment it *opened*, so
+at 12:00 the D1 candle indexed 00:00 passes both tests while containing
+twelve hours that have not happened. The test has to be on the candle's
+*close* time — `index + duration <= now` — and `config.TIMEFRAME_MINUTES` now
+carries the durations. The same fault, in a sharper form, let the resolver
+fill on a bar that had not begun.
+
+Every backtest stored before this is invalid.
+
+### What the analysis could not see
+
+- **Participation.** Every location engine read price *shape* — a swing, a
+  zone, an imbalance, a block. None read volume. `analysis/volumeprofile.py`
+  adds volume-by-price, the POC, the value area, high/low-volume nodes and a
+  path-obstruction check, and feeds the 20-point location pillar.
+- **Why Gold is moving.** `macro.py` reads the dollar and stops.
+  `trader/intermarket.py` adds the gold/silver ratio, a nominal yield proxy
+  and an equity read, which is what separates a *monetary* Gold move (silver
+  leads, the ratio falls, it trends) from a *haven* one (silver lags, the
+  ratio rises, it retraces hard). The two are identical on a Gold chart.
+- **Whether the price is any good.** `analysis/arrays.py` adds the dealing
+  range, premium/discount/equilibrium, the 62–79% optimal-entry band, and
+  breaker blocks — an order block that failed and flipped sign.
+- **Releases.** `analysis/events.py` had always read a calendar file that was
+  never written, so the entire event layer had been inert since it shipped.
+  `analysis/calendar_sync.py` generates it from published FOMC and CPI dates
+  and the first-Friday payroll rule, converting Eastern to UTC through the tz
+  database so the DST shift is right.
+
+### Pricing an entry on the timeframe it is timed on
+
+The first version of the premium/discount penalty read H4 and H1. That is a
+swing-scale answer to an intraday question, and it was wrong twice over:
+
+- This method times entries on H1, M30 and M15, so the range an entry is
+  priced against is the range of the timeframe it was timed on. Judging an
+  M15 entry against the H4 swing range marks half of every trending day as
+  "premium" and penalises exactly the intraday continuations the application
+  exists to find.
+- H4 disagreement is *already* charged by `htf_conflict`. Reading it here too
+  billed one disagreement twice.
+
+And a second-order fault the fix exposed: a market trending up lives in the
+upper half of its own range — that is what an uptrend *is*. On the finest
+execution timeframe that is close to permanent, so the penalty would have
+taxed every continuation. Premium/discount is a mean-reversion idea and now
+applies only where it means something: a range, or a counter-trend entry at a
+bad price. A trending execution timeframe is exempt.
+
+### The record was measuring the wrong rows
+
+`trader/expectancy.py` is now the single owner of what the record says.
+
+- **`entered = 1` is not the test; `fill_price IS NOT NULL` is.** Two
+  pre-migration rows carry `entered = 1` with no fill, no exit and +3.5R
+  each, and they were the only reason the stored total ever read positive.
+- **Duplicates were counted as trades.** The double-instance bug wrote every
+  setup twice for two days. Dedup is by strategy, direction and price *within
+  twenty minutes* — the bug's copies land seconds apart, a genuine re-entry
+  at the same level comes hours later and must survive.
+- **Sample size was ignored.** Estimates are shrunk toward "no edge" by
+  `n/(n+25)` instead of switching on at a cliff of eight trades.
+- **Silent and never-filled detectors are different failures.** Thirteen have
+  never produced a setup (broken or mis-calibrated); ten produce setups that
+  never fill (a zone-placement problem). Same symptom, opposite fixes.
+
+Neither is disabled. Standing principle 5b holds: context sizes a setup and
+never hides one.
+
+Clean live record: **25 trades, −2.52R, 36% wins**, and about **512 trades**
+needed to tell that average from zero.
+
+### Conviction was saturated
+
+Additive-and-clamped, so with 32 detectors agreeing it pinned at exactly
+100.0 on a third of all setups and could no longer rank them — measured, the
+better-than-median half returned −0.001R against −0.046R for the rest.
+Confirmations now take a share of the *remaining headroom*, and a detector's
+own read seeds at 96. Gates are checked before the compression, so nothing is
+withheld by it.
+
+### A test suite that assumes detectors are broken
+
+`tests/test_analysis_v12.py` gives every new detector a purpose-built series
+and asserts it is found. This is not ceremony — three detectors have shipped
+silent in this codebase already. Writing it caught two more:
+
+- the breaker detector demanded four swings when the pattern is three, and
+  was therefore silent on every series containing exactly one breaker;
+- low-volume nodes reported distribution *tails* (price never went there) as
+  gaps (price went through quickly) — opposite meanings for a target sitting
+  beyond one.
+
+### Also
+
+- `python -m goldassist.backtest` finally calls `history.load`, the deep
+  loader that was written, exported and never invoked. It refuses to run
+  while GoldAssistant.exe holds the MT5 connection.
+- `build.bat` runs the packaged smoke test *before* the installer. It was
+  after, and the no-Inno early exit took it with it, so the one gate that
+  catches windowed-build-only failures never ran on the machine that builds.
+- Version read from `goldassist.__version__` instead of typed in four places.
+- The project has git history for the first time.
+
+### Added to the standing principles
+
+8. **A new detector that never fires is the default outcome, not the
+   exception.** Prove each one fires on a purpose-built series before
+   believing it works.
+9. **Sample size is part of the measurement.** An average over three trades
+   is noise with a decimal point; shrink every estimate toward "no edge" in
+   proportion to the evidence behind it.
+10. **Price an entry against the timeframe it was timed on.** This method is
+   intraday; a swing-scale range must not veto an intraday trade.
