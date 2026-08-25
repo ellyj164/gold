@@ -14,10 +14,11 @@ import logging
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import timeutil
+from .. import __version__
 from ..backtest import engine as backtest_engine
 from ..config import AppConfig, MICRO_TIMEFRAMES, TIMEFRAMES
 from ..decision import profile as profile_module
@@ -55,8 +56,29 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     # -- pages -------------------------------------------------------------
 
     @app.get("/")
-    def index() -> FileResponse:
-        return FileResponse(UI_DIR / "index.html")
+    def index() -> HTMLResponse:
+        """The terminal page, with its assets stamped for this build.
+
+        `index.html` links `/static/styles.css` and `/static/app.js` by bare
+        path. `StaticFiles` sends an ETag but no `Cache-Control`, and a
+        browser is free to reuse a bare-path asset from cache without
+        revalidating -- which it does. The result is that an updated app
+        renders with the *previous* build's stylesheet and script until the
+        cache happens to expire.
+
+        This is not theoretical: it happened while verifying the signal-popup
+        change. The new CSS was present in the installed file and served
+        correctly, and the page still laid the popup out with the old rules,
+        because the browser never asked for the new one.
+
+        Appending the version turns every release into a new URL, so an
+        upgrade can never render half-old. Within a release the URL is stable
+        and caching still does its job.
+        """
+        html = (UI_DIR / "index.html").read_text(encoding="utf-8")
+        for asset in ("styles.css", "chart.js", "app.js"):
+            html = html.replace(f"/static/{asset}", f"/static/{asset}?v={__version__}")
+        return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
     app.mount("/static", StaticFiles(directory=UI_DIR / "static"), name="static")
 

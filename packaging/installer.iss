@@ -9,7 +9,7 @@
 
 #define AppName        "Gold Decision Assistant"
 #define AppShortName   "GoldAssistant"
-#define AppVersion     "1.2.1"
+#define AppVersion     "1.2.2"
 #define AppPublisher   "Joseph"
 #define AppExeName     "GoldAssistant.exe"
 
