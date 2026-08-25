@@ -212,8 +212,50 @@
         </div>
 
         <div class="card wide">
-          <h3>AI analyst</h3>
+          <h3>AI analyst
+            <span class="ai-badge" id="aiModeBadge" title="Which analyst produced the reading below">offline</span>
+            <button class="btn ghost tiny" id="aiSettingsToggle" type="button">Settings</button>
+          </h3>
+
+          <!-- Provider settings. Collapsed by default: it is configured once
+               and then wants to be out of the way. -->
+          <div class="ai-settings" id="aiSettings" hidden>
+            <div class="ai-row">
+              <label for="aiMode">Analysis mode</label>
+              <select id="aiMode">
+                <option value="offline">Offline — the engine's own analyst, no API needed</option>
+                <option value="online">Online — send the measured facts to a model</option>
+              </select>
+            </div>
+            <div class="ai-row">
+              <label for="aiProvider">Provider</label>
+              <select id="aiProvider"></select>
+            </div>
+            <div class="ai-row">
+              <label for="aiModel">Model</label>
+              <input type="text" id="aiModel" spellcheck="false" autocomplete="off">
+            </div>
+            <div class="ai-row">
+              <label for="aiKey">API key</label>
+              <input type="password" id="aiKey" spellcheck="false" autocomplete="off"
+                     placeholder="Paste a key to set or replace it">
+            </div>
+            <div class="ai-hint" id="aiKeyState"></div>
+            <div class="ai-actions">
+              <button class="btn" id="aiTestBtn" type="button">Test connection</button>
+              <button class="btn primary" id="aiSaveBtn" type="button">Save</button>
+            </div>
+            <div class="ai-result" id="aiSettingsResult"></div>
+            <p class="ai-note">
+              Keys are stored on this machine only, in <code id="aiStorePath"></code>,
+              readable by your Windows account alone. They are never logged and never
+              sent anywhere except to the provider you choose. Offline mode reads the
+              live feed directly and needs no key at all.
+            </p>
+          </div>
+
           <div class="explanation" id="explanation">Explanation will appear here.</div>
+          <div class="ai-stamp" id="aiStamp"></div>
           <button class="btn" id="regenerateBtn">Regenerate explanation</button>
         </div>
 

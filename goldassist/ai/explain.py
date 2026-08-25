@@ -139,6 +139,14 @@ def decision_narrative(decision: dict, analysis: dict) -> str:
             "meaningfully split."
         )
 
+    # 4b. Where price actually is, as opposed to what pattern it made.
+    #
+    # The three questions a trader asks first: is this a fair price, has the
+    # market been trading here, and did a level fail? The narrative could
+    # answer none of them, while the scoring engine had been using all three
+    # since v1.2.0.
+    parts.extend(_location_sentences(analysis, direction))
+
     # 5. What is missing (the heart of a WAIT).
     waiting = decision.get("waiting_for") or []
     if waiting:
@@ -168,11 +176,98 @@ def decision_narrative(decision: dict, analysis: dict) -> str:
     for w in warnings[:2]:
         parts.append(w["message"])
 
+    # 8. What is coming. A release outranks everything above it.
+    event = _event_sentence(analysis)
+    if event:
+        parts.append(event)
+
     parts.append(
         "This is technical evidence, not a probability of profit, and the application does "
         "not place trades — the decision stays with you."
     )
     return "\n\n".join(parts)
+
+
+def _location_sentences(analysis: dict, direction: str) -> list[str]:
+    """Volume profile, premium/discount and breakers, in plain sentences.
+
+    Reads the execution timeframes first. This method is intraday: the range
+    and the value area an entry is priced against are those of the timeframe
+    the entry is timed on, not the swing-scale ones.
+    """
+    out: list[str] = []
+    frames = analysis.get("timeframes") or {}
+
+    for tf in ("M15", "M30", "H1"):
+        vp = (frames.get(tf) or {}).get("volume_profile") or {}
+        if not vp.get("available"):
+            continue
+        line = (f"On {tf} the market has been trading around {vp['poc']:.2f}, with its "
+                f"value area between {vp['val']:.2f} and {vp['vah']:.2f}. Price is "
+                f"{vp.get('location', 'inside value')} — {vp.get('meaning', '')}.")
+        node = vp.get("nearest_low_volume_node")
+        if node is not None:
+            line += (f" There is thin volume around {node:.2f}, the kind of gap price "
+                     f"crosses quickly once it starts moving.")
+        out.append(line)
+        break
+
+    for tf in ("M15", "M30", "H1"):
+        band = (frames.get(tf) or {}).get("dealing_range") or {}
+        if not band.get("available"):
+            continue
+        position = float(band.get("position", 0.5)) * 100
+        verdict = ("a good price for a long" if band["zone"] == "discount"
+                   else "a good price for a short" if band["zone"] == "premium"
+                   else "neither cheap nor expensive")
+        line = (f"Against the {tf} dealing range {band['low']:.2f}–{band['high']:.2f}, "
+                f"price sits at {position:.0f}% of it — {band['zone']}, which is "
+                f"{verdict}.")
+        if band.get("favours") not in (direction, "neutral") and band["zone"] != "equilibrium":
+            line += (f" That is the wrong half for a {direction} entry, which is the "
+                     f"most common way a good pattern becomes a bad trade.")
+        out.append(line)
+        break
+
+    for tf in ("M15", "H1", "H4"):
+        breakers = (frames.get(tf) or {}).get("breakers") or {}
+        if not breakers.get("available"):
+            continue
+        near = breakers.get("nearest_bullish" if direction == "bullish"
+                            else "nearest_bearish")
+        if not near:
+            continue
+        out.append(
+            f"A {tf} breaker sits at {near['bottom']:.2f}–{near['top']:.2f} — a level that "
+            f"failed and flipped side, marking where the previous move's participants were "
+            f"proved wrong."
+            + (" Price is inside it now." if near.get("price_inside") else ""))
+        break
+
+    return out
+
+
+def _event_sentence(analysis: dict) -> str | None:
+    """A release warning, when one is close enough to change what to do.
+
+    Four hours is the horizon because that is roughly when Gold's spread and
+    behaviour begin to reflect an imminent print. Beyond it the warning is
+    noise; inside it, it outranks the technical read.
+    """
+    events = analysis.get("events") or {}
+    if not events.get("available"):
+        return None
+    nxt = events.get("next_high_impact")
+    if not nxt:
+        return None
+    minutes = int(nxt.get("minutes_until") or 0)
+    if minutes < 0 or minutes > 240:
+        return None
+    when = f"{minutes} minutes" if minutes >= 1 else "moments"
+    return (f"{nxt['title']} is {when} away. Technical setups behave abnormally around a "
+            f"release of this size: spreads widen, levels are swept and reclaimed, and a "
+            f"stop placed on structure can be taken by noise alone. That does not "
+            f"invalidate the analysis above — it changes what it is worth acting on now.")
 
 
 def answer_offline(question: str, decision: dict, analysis: dict) -> str:

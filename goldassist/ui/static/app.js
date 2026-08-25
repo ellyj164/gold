@@ -541,6 +541,134 @@
     if (kind !== "ready") setTimeout(dismiss, 20000);
   }
 
+  /* ------------------------------------------------------- analyst settings
+   *
+   * Which analyst produced a reading matters as much as the reading. The
+   * offline analyst assembles its narrative from the engine's own
+   * measurements and is always available; an online provider is handed those
+   * same measurements and writes about them. Neither invents a price.
+   *
+   * The panel never receives a key. The server sends a masked hint and a
+   * boolean, and an empty key field means "leave whatever is stored alone" --
+   * so saving a model change cannot silently wipe a key.
+   */
+  let aiSettings = null;
+
+  function renderAiStamp(result) {
+    const el = $("aiStamp");
+    if (!el || !result) return;
+    const bits = [];
+    if (result.generated_at) bits.push(`generated ${result.generated_at} ${state.clock.label}`);
+    if (result.price !== undefined && result.price !== null) bits.push(`at ${fmt(result.price)}`);
+    if (result.model) bits.push(escapeHtml(result.model));
+    el.textContent = bits.join(" · ");
+  }
+
+  function renderAiBadge(settings) {
+    const badge = $("aiModeBadge");
+    if (!badge || !settings) return;
+    const online = settings.active === "online";
+    badge.textContent = online
+      ? (settings.providers.find((p) => p.provider === settings.provider) || {}).label || "online"
+      : "offline";
+    badge.className = `ai-badge ${online ? "online" : "offline"}`;
+    // The important case: the trader chose online and it is not working. The
+    // app keeps analysing either way, but it must not imply it is online.
+    badge.title = settings.mode === "online" && !online
+      ? `Online was selected but is not active: ${settings.note || "no key"}`
+      : (online ? "Readings come from the configured model"
+                : "Readings come from the engine's own analyst");
+    if (settings.mode === "online" && !online) badge.classList.add("degraded");
+  }
+
+  function fillAiPanel(settings) {
+    aiSettings = settings;
+    $("aiMode").value = settings.mode;
+    const select = $("aiProvider");
+    select.innerHTML = settings.providers
+      .map((p) => `<option value="${escapeHtml(p.provider)}">${escapeHtml(p.label)}</option>`)
+      .join("");
+    select.value = settings.provider;
+    $("aiStorePath").textContent = settings.store_path || "";
+    syncAiProviderFields();
+    renderAiBadge(settings);
+  }
+
+  function syncAiProviderFields() {
+    if (!aiSettings) return;
+    const name = $("aiProvider").value;
+    const entry = aiSettings.providers.find((p) => p.provider === name);
+    if (!entry) return;
+    $("aiModel").value = entry.model || entry.default_model || "";
+    $("aiModel").placeholder = entry.default_model || "";
+    $("aiKey").value = "";
+    $("aiKeyState").innerHTML = entry.has_key
+      ? `Key set (${escapeHtml(entry.key_hint)}) from ${escapeHtml(entry.key_source)}.`
+        + ` Leave the field empty to keep it.`
+      : `<span class="warn">No key stored.</span> Paste one, or set `
+        + `<code>${escapeHtml(entry.env_var)}</code> in the environment.`;
+  }
+
+  async function loadAiSettings() {
+    try {
+      fillAiPanel(await api("/api/ai/settings"));
+    } catch (err) {
+      console.error("could not load analyst settings", err);
+    }
+  }
+
+  function wireAiSettings() {
+    const toggle = $("aiSettingsToggle");
+    if (!toggle) return;
+    toggle.addEventListener("click", () => {
+      const panel = $("aiSettings");
+      panel.hidden = !panel.hidden;
+      if (!panel.hidden) loadAiSettings();
+    });
+    $("aiProvider").addEventListener("change", syncAiProviderFields);
+
+    const say = (text, ok) => {
+      const el = $("aiSettingsResult");
+      el.className = `ai-result ${ok === true ? "ok" : ok === false ? "err" : ""}`;
+      el.textContent = text;
+    };
+
+    $("aiTestBtn").addEventListener("click", async () => {
+      say("Testing…");
+      try {
+        const r = await api("/api/ai/test", {
+          method: "POST",
+          body: JSON.stringify({
+            provider: $("aiProvider").value,
+            // Test what is typed, if anything, so a key can be checked
+            // before it is committed to disk.
+            api_key: $("aiKey").value || null,
+            model: $("aiModel").value || null,
+          }),
+        });
+        say(r.message, r.ok);
+      } catch (err) { say(err.message, false); }
+    });
+
+    $("aiSaveBtn").addEventListener("click", async () => {
+      say("Saving…");
+      const provider = $("aiProvider").value;
+      const payload = { mode: $("aiMode").value, provider, keys: {}, models: {} };
+      if ($("aiKey").value) payload.keys[provider] = $("aiKey").value;
+      if ($("aiModel").value) payload.models[provider] = $("aiModel").value;
+      try {
+        const saved = await api("/api/ai/settings", {
+          method: "POST", body: JSON.stringify(payload),
+        });
+        fillAiPanel(saved);
+        say(saved.active === "online"
+              ? `Saved. Analysis is online via ${provider}.`
+              : `Saved. Analysis is offline${saved.note ? " — " + saved.note : "."}`,
+            saved.active === "online" || saved.mode === "offline");
+      } catch (err) { say(err.message, false); }
+    });
+  }
+
   function notifyDesktop(s, kind) {
     // A desktop notification is a bonus, never a requirement.
     try {
@@ -1899,13 +2027,21 @@ ${firedAt}`,
     });
 
     $("regenerateBtn").addEventListener("click", async () => {
-      $("explanation").textContent = "Generating…";
+      $("explanation").textContent = "Re-analysing…";
+      $("aiStamp").textContent = "";
       try {
-        setExplanation(await api("/api/explain", { method: "POST" }));
+        // The endpoint re-runs the analysis cycle before explaining, so the
+        // reading is of the market as it is now rather than as it was when
+        // the last cycle happened to land.
+        const result = await api("/api/explain", { method: "POST" });
+        setExplanation(result);
+        renderAiStamp(result);
       } catch (err) {
         $("explanation").innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`;
       }
     });
+
+    wireAiSettings();
 
     $("chartImageInput").addEventListener("change", async (e) => {
       const file = e.target.files[0];

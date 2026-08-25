@@ -17,8 +17,11 @@ from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, WebSocke
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from datetime import datetime, timezone
+
 from .. import timeutil
 from .. import __version__
+from ..ai import providers as ai_providers
 from ..backtest import engine as backtest_engine
 from ..config import AppConfig, MICRO_TIMEFRAMES, TIMEFRAMES
 from ..decision import profile as profile_module
@@ -228,13 +231,67 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return safe(service.teach(concept))
 
     @app.post("/api/explain")
-    def explain() -> dict:
+    def explain(refresh: bool = Query(True)) -> dict:
+        """Re-analyse and re-explain.
+
+        `refresh` runs a fresh analysis cycle first, which is what makes the
+        Regenerate button mean something. Without it the offline analyst --
+        a pure function of the decision and the analysis -- returned a
+        byte-identical string, so pressing Regenerate appeared to do nothing.
+        It *was* regenerating; there was simply nothing new to regenerate
+        from. Now the numbers are current, and the stamp below proves it ran.
+        """
+        if refresh:
+            try:
+                service.refresh(force=True)
+            except Exception as exc:
+                log.warning("Refresh before explain failed: %s", exc)
+
         snap = service.snapshot()
         if not snap.get("ready"):
             raise HTTPException(503, "Analysis is not ready yet.")
-        result = service.ai.explain_decision(service.decision, service.analysis)
+
+        result = dict(service.ai.explain_decision(service.decision, service.analysis))
+        result["generated_at"] = timeutil.stamp(datetime.now(timezone.utc).isoformat())
+        result["price"] = service.analysis.get("price")
+        result["mode"] = service.ai.settings().get("active", "offline")
         service.explanation = result
         return safe(result)
+
+    # -- the analyst's own settings ----------------------------------------
+
+    @app.get("/api/ai/settings")
+    def ai_settings() -> dict:
+        """Provider, mode and which keys are present. Never a key itself."""
+        return safe(service.ai.settings())
+
+    @app.post("/api/ai/settings")
+    async def save_ai_settings(request: Request) -> dict:
+        body = await request.json()
+        mode = body.get("mode")
+        provider = body.get("provider")
+        if mode is not None and mode not in ("online", "offline"):
+            raise HTTPException(400, "Mode must be 'online' or 'offline'.")
+        if provider is not None and provider not in ai_providers.PROVIDERS:
+            raise HTTPException(
+                400, f"Provider must be one of: {', '.join(ai_providers.PROVIDERS)}.")
+        try:
+            return safe(service.ai.apply_settings(
+                mode=mode, provider=provider,
+                keys=body.get("keys") or {}, models=body.get("models") or {}))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/ai/test")
+    async def test_ai(request: Request) -> dict:
+        """Make a real call, so the panel can prove a key works."""
+        body = await request.json()
+        provider = body.get("provider")
+        if provider not in ai_providers.PROVIDERS:
+            raise HTTPException(
+                400, f"Provider must be one of: {', '.join(ai_providers.PROVIDERS)}.")
+        return safe(service.ai.test_provider(
+            provider, api_key=body.get("api_key"), model=body.get("model")))
 
     @app.post("/api/chart-image")
     async def chart_image(file: UploadFile, question: str = Query(None)) -> dict:

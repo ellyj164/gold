@@ -1073,3 +1073,67 @@ li.resolved.untaken .verdict { color: var(--muted); }
   .clock-block { display: none; }
   .topbar { grid-template-columns: minmax(150px, 1fr) auto auto minmax(150px, 1fr); }
 }
+
+/* ---------------------------------------------------------- analyst settings
+ *
+ * Which analyst produced a reading is as important as the reading, so the
+ * badge sits in the card heading rather than in the settings panel: it is
+ * status, not configuration. The panel itself is collapsed by default —
+ * configured once, then out of the way.
+ */
+.ai-badge {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.7px;
+  padding: 2px 7px; border-radius: 10px; margin-left: 8px;
+  border: 1px solid var(--border); color: var(--muted); vertical-align: middle;
+}
+.ai-badge.online { color: var(--accent); border-color: var(--accent); }
+/* Online was chosen and is not working. The app still analyses, but the
+   badge must not imply a model is answering when none is. */
+.ai-badge.degraded { color: var(--bear); border-color: var(--bear); }
+
+.btn.tiny { font-size: 10px; padding: 3px 9px; margin-left: 6px; vertical-align: middle; }
+.btn.ghost { background: transparent; }
+
+.ai-settings {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px 14px; margin-bottom: 12px; background: rgba(255, 255, 255, 0.02);
+}
+.ai-row {
+  display: grid; grid-template-columns: 120px 1fr; gap: 10px;
+  align-items: center; margin-bottom: 8px;
+}
+.ai-row label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.7px;
+  color: var(--muted);
+}
+.ai-row select, .ai-row input {
+  background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 5px;
+  padding: 6px 8px; font-size: 12px; font-family: inherit; width: 100%;
+}
+.ai-row input { font-family: var(--mono); }
+
+.ai-hint { font-size: 11px; color: var(--muted); margin: 4px 0 10px 130px; }
+.ai-hint .warn { color: var(--bear); }
+.ai-hint code, .ai-note code { font-family: var(--mono); font-size: 10.5px; }
+
+.ai-actions { display: flex; gap: 8px; margin-left: 130px; }
+.ai-result { font-size: 11.5px; margin: 8px 0 0 130px; min-height: 16px; }
+.ai-result.ok { color: var(--bull); }
+.ai-result.err { color: var(--bear); }
+
+.ai-note {
+  font-size: 10.5px; color: var(--muted); line-height: 1.55;
+  margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--border);
+}
+
+/* Proof the Regenerate button did something: when it ran, and at what price. */
+.ai-stamp {
+  font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+  margin: 6px 0 8px;
+}
+
+@media (max-width: 720px) {
+  .ai-row { grid-template-columns: 1fr; gap: 4px; }
+  .ai-hint, .ai-actions, .ai-result { margin-left: 0; }
+}
