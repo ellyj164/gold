@@ -52,12 +52,18 @@ SWING_STRENGTH = {"D1": 3, "H4": 3, "H1": 2, "M30": 2, "M15": 2, "M5": 2, "M1": 
 # A profile answers "where has this market been traded lately", and "lately"
 # has to mean something. 480 M15 candles is five trading days -- the week the
 # market is currently in. 480 D1 candles is two years, which describes a Gold
-# that no longer exists and would anchor a POC hundreds of dollars away.
+# that no longer exists and would anchor a POC hundreds of dollars away, so
+# D1 is excluded.
 #
-# H1 and M15 are the two that matter: H1 frames the swing the trade sits in,
-# M15 frames the session. M5 and below add nothing a profile can say that the
-# tape does not say faster, and cost a histogram per cycle.
-PROFILE_TIMEFRAMES = ("H4", "H1", "M15")
+# Everything from H4 down to M5 is included, because this method is intraday
+# and the profile that prices an entry is the profile of the timeframe the
+# entry is timed on. An M5 profile spans about forty hours -- the last two
+# sessions -- which is precisely the window a scalp is working inside, and
+# excluding it would leave the fastest setups priced against a range they
+# will never trade to. Each rung answers a different question and the cost is
+# one histogram per *closed candle* per timeframe, not per cycle, because
+# `analyse_timeframe_cached` sits in front of it.
+PROFILE_TIMEFRAMES = ("H4", "H1", "M30", "M15", "M5")
 
 
 def analyse_timeframe(df: pd.DataFrame, timeframe: str) -> dict:

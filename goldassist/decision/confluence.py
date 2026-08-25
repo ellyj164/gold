@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 
+from ..config import EXECUTION_TIMEFRAMES
 from .profile import StrategyProfile
 
 # The catalogue mirrors the six forms of evidence the specification names as
@@ -344,7 +345,15 @@ def _value_area_component(tfs: dict, direction: str, price: float,
     """
     best: tuple[float, str] | None = None
 
-    for tf in ("H4", "H1", "M15"):
+    # Finest first, and the execution timeframes lead.
+    #
+    # An intraday entry is priced against the session's value area, not the
+    # week's: being above the H4 value area says nothing useful about a trade
+    # that will be over in two hours, while being at the M15 value-area low
+    # says a great deal. H4 is kept as the last resort so a setup still gets a
+    # location read when the intraday profiles are unavailable, but it no
+    # longer outranks the timeframe the entry is actually timed on.
+    for tf in (*reversed(EXECUTION_TIMEFRAMES), "H4"):
         vp = (tfs.get(tf, {}) or {}).get("volume_profile") or {}
         if not vp.get("available"):
             continue
@@ -446,13 +455,49 @@ def _penalties(analysis: dict, direction: str, profile: StrategyProfile) -> list
     # price against a *pattern* and none measured it against the range. The
     # pattern can be perfect and the price still bad.
     #
-    # Read from H1 and H4 only. Below that the "range" is an hour of noise and
-    # its midpoint is not a level anyone is trading against.
-    for tf in ("H4", "H1"):
+    # Read on the *execution* timeframes, finest first, and never on H4.
+    #
+    # This method is intraday: D1 and H4 set direction, and H1, M30 and M15
+    # are where an entry is actually timed. The range an intraday entry sits
+    # in is the range of the timeframe it was timed on, so that is the range
+    # its price has to be judged against. Pricing an M15 entry against the H4
+    # swing range would mark half of every trending day as "premium" and
+    # penalise exactly the intraday continuations this application exists to
+    # find -- the aim is to catch every opportunity, not to hold out for the
+    # swing-scale discount that may not come back for two days.
+    #
+    # H4 is excluded rather than merely deprioritised because a higher
+    # timeframe that disagrees with the trade is *already* penalised, by
+    # `htf_conflict` above. Reading it here too would charge one disagreement
+    # twice.
+    #
+    # A range too tight to mean anything is refused inside `dealing_range`
+    # itself, against that timeframe's own ATR -- so the guard travels down
+    # the ladder with the timeframe instead of needing a whitelist here.
+    for tf in reversed(EXECUTION_TIMEFRAMES):
         band = (tfs.get(tf, {}) or {}).get("dealing_range") or {}
         if not band.get("available") or band.get("zone") == "equilibrium":
             continue
         if band.get("favours") in (direction, "neutral"):
+            continue
+
+        # Premium and discount are mean-reversion ideas, and they do not
+        # describe a trending market.
+        #
+        # A market trending up spends nearly all of its time in the upper half
+        # of its own most recent range -- that is what an uptrend *is*. On the
+        # finest execution timeframe that is close to permanent, so charging a
+        # penalty for it would tax every intraday continuation and quietly
+        # suppress the largest class of setup this method looks for. The
+        # concept applies to a pullback or a reversal being bought at a bad
+        # price; it does not apply to a breakout, which takes price at a new
+        # high on purpose.
+        #
+        # So: when this timeframe's own structure is trending with the trade,
+        # being high in the range is the thesis rather than a fault, and the
+        # penalty is skipped.
+        trend = ((tfs.get(tf, {}) or {}).get("structure") or {}).get("trend")
+        if trend == direction:
             continue
         # How deep into the wrong half, 0..1, so the penalty scales with how
         # bad the price is rather than switching on at the midpoint.

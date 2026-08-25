@@ -417,6 +417,78 @@ def test_context_multiplier_is_bounded():
     check("a session with no record leaves sizing alone", flat == 1.0, str(flat))
 
 
+# --- premium/discount is an intraday read -----------------------------------
+
+def _range_analysis(position: float, trend: str, timeframe: str = "M15") -> dict:
+    zone = ("premium" if position > 0.55
+            else "discount" if position < 0.45 else "equilibrium")
+    favours = ("bearish" if position > 0.55
+               else "bullish" if position < 0.45 else "neutral")
+    return {
+        "price": 2090.0, "atr": 5.0,
+        "timeframes": {timeframe: {
+            "dealing_range": {"available": True, "zone": zone, "favours": favours,
+                              "position": position, "low": 2000.0, "high": 2100.0,
+                              "equilibrium": 2050.0},
+            "structure": {"trend": trend},
+        }},
+        "levels": {}, "alignment": {"conflicts": [], "direction": "bullish"},
+        "liquidity": {"sweeps": []}, "regime": {},
+    }
+
+
+def _premium_penalty(analysis: dict, direction: str = "bullish"):
+    from goldassist.decision import confluence, profile as profile_module
+    found = confluence._penalties(analysis, direction, profile_module.get(None))
+    return next((p for p in found if p.factor == "premium_discount"), None)
+
+
+def test_premium_discount_is_intraday():
+    print("premium/discount: an intraday read, not a swing one")
+    from goldassist.config import EXECUTION_TIMEFRAMES
+
+    # The method is intraday: entries are timed on H1, M30 and M15, so the
+    # range an entry is priced against is the range of the timeframe it was
+    # timed on. Reading this on H4 would let a swing-scale range veto an
+    # intraday trade, and would mark half of every trending day unbuyable.
+    check("the read is scoped to the execution timeframes",
+          set(EXECUTION_TIMEFRAMES) == {"H1", "M30", "M15"},
+          str(EXECUTION_TIMEFRAMES))
+    check("an H4 range alone raises no premium penalty",
+          _premium_penalty(_range_analysis(0.92, "ranging", "H4")) is None)
+
+    # The one that matters most: a trending intraday market lives at the top
+    # of its own range. Penalising that would tax every continuation and
+    # suppress the largest class of setup this application looks for.
+    check("a continuation in an uptrend is not penalised for being high",
+          _premium_penalty(_range_analysis(0.92, "bullish")) is None)
+
+    # But a genuinely bad price still is.
+    ranging = _premium_penalty(_range_analysis(0.92, "ranging"))
+    check("buying the top of a *range* is penalised", ranging is not None)
+    counter = _premium_penalty(_range_analysis(0.92, "bearish"))
+    check("buying the top of a range in a downtrend is penalised",
+          counter is not None)
+
+    check("buying the discount is never penalised",
+          _premium_penalty(_range_analysis(0.10, "ranging")) is None)
+    check("equilibrium is not penalised",
+          _premium_penalty(_range_analysis(0.50, "ranging")) is None)
+
+    # It sizes; it must never gate. A penalty is points off a score, and the
+    # setup is still built, still shown, still alerted.
+    if ranging is not None:
+        check("the penalty is bounded", ranging.points <= 9.0 + 1e-9,
+              str(ranging.points))
+
+    # Deeper into the wrong half must cost more than barely into it.
+    shallow = _premium_penalty(_range_analysis(0.60, "ranging"))
+    deep = _premium_penalty(_range_analysis(0.98, "ranging"))
+    check("the penalty scales with how bad the price is",
+          shallow is not None and deep is not None and deep.points > shallow.points,
+          f"{shallow.points if shallow else None} vs {deep.points if deep else None}")
+
+
 # --- causality --------------------------------------------------------------
 
 def test_backtest_causality():
@@ -469,6 +541,7 @@ def main() -> int:
     test_shrinkage()
     test_report_and_adjustment()
     test_context_multiplier_is_bounded()
+    test_premium_discount_is_intraday()
     test_backtest_causality()
 
     print()
