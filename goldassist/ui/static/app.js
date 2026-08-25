@@ -471,6 +471,41 @@
       + ` — recorded to history</div>`;
   }
 
+  /*
+   * When the signal fired, on the trader's clock, with the date.
+   *
+   * A popup that says only "14:37" is ambiguous the moment it is left on
+   * screen, screenshotted, or read after midnight -- and the alert for a
+   * setup that has been on the board since yesterday's session would read as
+   * though it had just appeared. The date removes that.
+   *
+   * `fired_at` is the server's own stamp, frozen onto the setup when it was
+   * created and already converted to the display offset by
+   * `goldassist.timeutil`. Using it rather than re-deriving the date here
+   * means the popup, the signal log and the history tab can never disagree
+   * about when something happened. `fmtStamp` is the fallback for anything
+   * that predates the frozen field.
+   */
+  function whenLines(s, kind) {
+    const zone = state.clock.label || "";
+    const fired = s.fired_at || fmtStamp(s.created_at);
+    const session = s.fired_session_label
+      ? ` · ${s.fired_session_label}` : "";
+    let html = `<div class="at-when"><span>Fired</span>`
+      + `<b>${escapeHtml(fired)}</b>`
+      + `<i>${escapeHtml(zone)}${escapeHtml(session)}</i></div>`;
+
+    // A resolved setup has two moments that matter and they are often on
+    // different days -- a setup that fired in the London session and stopped
+    // out after the New York close spans the date boundary.
+    if ((kind === "won" || kind === "lost") && s.exit_at) {
+      html += `<div class="at-when"><span>Closed</span>`
+        + `<b>${escapeHtml(fmtStamp(s.exit_at))}</b>`
+        + `<i>${escapeHtml(zone)}</i></div>`;
+    }
+    return html;
+  }
+
   function showAlert(s, kind) {
     const host = $("alertToasts");
     if (!host) return;
@@ -486,6 +521,7 @@
       + `<span class="at-title">${escapeHtml(ALERT_TITLE[kind] || s.status)}</span></div>`
       + `<div class="at-setup">${escapeHtml(s.setup_label)} · `
       + `${escapeHtml(s.strategy_name || "")} · ${Math.round(s.score)}/100</div>`
+      + whenLines(s, kind)
       + (resolved ? resultLines(s) : entryLines(s))
       + (resolved ? "" :
          `<div class="at-levels">`
@@ -514,11 +550,18 @@
       const where = zone
         ? `enter ${fmt(zone.low)}–${fmt(zone.high)} (best ${fmt(zone.preferred)})`
         : `at market ${fmt(s.price)}`;
+      // The same reason the toast carries a date: a desktop notification can
+      // sit unread in the tray for hours, and "14:37" alone does not say
+      // which day it belongs to.
+      const firedAt = `fired ${s.fired_at || fmtStamp(s.created_at)} ${state.clock.label || ""}`.trim();
       if (kind === "won" || kind === "lost") {
+        const closedAt = s.exit_at ? `closed ${fmtStamp(s.exit_at)}` : firedAt;
         const done = () => new Notification(
           `XAUUSD ${side} · ${ALERT_TITLE[kind]}`,
           { body: `${s.setup_label} · ${s.result_pips >= 0 ? "+" : ""}`
-                  + `${Math.round(s.result_pips)} pips (${Number(s.r_multiple).toFixed(2)}R)`,
+                  + `${Math.round(s.result_pips)} pips (${Number(s.r_multiple).toFixed(2)}R)`
+                  + `
+${closedAt}`,
             tag: `${s.id}:${s.status}` });
         if (Notification.permission === "granted") done();
         return;
@@ -528,7 +571,8 @@
         { body: `${s.setup_label} · ${Math.round(s.score)}/100`
                 + `
 ${where}
-stop ${fmt((s.invalidation || {}).price)}`,
+stop ${fmt((s.invalidation || {}).price)}
+${firedAt}`,
           tag: `${s.id}:${s.status}` });
       if (Notification.permission === "granted") show();
       else if (Notification.permission !== "denied") {
