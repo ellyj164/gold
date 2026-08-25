@@ -1,0 +1,48 @@
+AI-POWERED GOLD TRADING DECISION ASSISTANT
+Important information — please read before installing
+
+
+WHAT THIS SOFTWARE IS
+
+This application is a decision-support and analytical tool for XAUUSD (Gold).
+It studies the market across multiple timeframes, scores the technical
+evidence, and presents a BUY, SELL or WAIT recommendation together with the
+reasoning behind it.
+
+
+WHAT THIS SOFTWARE IS NOT
+
+It is not an automated trading system. It will not open, modify or close
+trades, will not place pending orders, and will not manage your broker
+account. It connects to MetaTrader 5 to READ price data only.
+
+It is not financial advice, and it is not a licensed advisory service. No
+recommendation it produces is a recommendation to buy or sell anything.
+
+
+ABOUT THE SETUP SCORE
+
+The score shown against every setup measures the weight of the technical
+evidence the engine has found. It is NOT a probability of profit, and it does
+not indicate how likely a trade is to win. A high score means several
+independent forms of technical evidence agree — nothing more.
+
+
+NO GUARANTEE
+
+Trading Gold involves substantial risk of loss. Past performance, including
+any backtested result this software reports, does not indicate future results.
+Backtests are simulations and do not account for slippage, spread changes,
+requotes, or the psychological reality of trading live money.
+
+This software is provided "as is", without warranty of any kind. The author
+accepts no liability for any loss arising from its use.
+
+
+YOUR RESPONSIBILITY
+
+Every trading decision is yours. The application exists to help you make that
+decision on better evidence — not to make it for you.
+
+
+By installing this software you confirm that you understand the above.

@@ -1,0 +1,16 @@
+# AI-Powered Gold Trading Decision Assistant — Python 3.11+ on Windows
+#
+# MetaTrader5 is Windows-only; the rest is portable, but the market data layer
+# requires a running MT5 terminal.
+
+MetaTrader5>=5.0.45      # XAUUSD candles and ticks from the MT5 terminal
+pandas>=2.2              # candle frames and resampling
+numpy>=1.26              # indicator and scoring maths
+
+fastapi>=0.110           # local API for the terminal UI
+uvicorn>=0.27            # ASGI server
+websockets>=12.0         # live push to the dashboard (uvicorn WebSocket support)
+python-multipart>=0.0.9  # chart-screenshot uploads
+
+anthropic>=0.40          # Claude analyst layer (optional at runtime)
+pywebview>=5.0           # native desktop window (falls back to the browser)

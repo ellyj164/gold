@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>XAUUSD — AI Trading Decision Assistant</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%23d9a441%27/%3E%3Ctext x=%2716%27 y=%2722%27 font-size=%2714%27 font-family=%27monospace%27 font-weight=%27bold%27 text-anchor=%27middle%27 fill=%27%2314100a%27%3EXA%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">XAU</span>
+      <div>
+        <div class="brand-title">Gold Decision Assistant</div>
+        <div class="brand-sub" id="symbolLabel">connecting…</div>
+      </div>
+    </div>
+
+    <div class="price-block">
+      <div class="price" id="price">—</div>
+      <div class="price-meta">
+        <span id="spread">spread —</span>
+        <span id="atrLabel">ATR —</span>
+      </div>
+    </div>
+
+    <div class="verdict" id="verdict">
+      <div class="verdict-action" id="verdictAction">…</div>
+      <div class="verdict-score">
+        <div class="score-bar"><div class="score-fill" id="scoreFill"></div></div>
+        <span id="scoreText">0/100</span>
+      </div>
+    </div>
+
+    <div class="clock-block" id="clockBlock" title="Your clock, and the session Gold is trading in">
+      <div class="clock-time"><span id="clockTime">--:--:--</span><span class="clock-zone" id="clockZone">GMT+2</span></div>
+      <div class="clock-session"><span class="session-dot" id="sessionDot"></span><span id="clockSession">—</span></div>
+    </div>
+
+    <div class="topbar-right">
+      <button id="soundToggle" class="sound-toggle" title="Signal alert sound">🔔</button>
+      <select id="profileSelect" title="Strategy profile"></select>
+      <div class="status" id="status"><span class="dot"></span><span id="statusText">…</span></div>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-view="terminal">Terminal</button>
+    <button class="tab" data-view="analysis">Analysis</button>
+    <button class="tab" data-view="trader">Trader</button>
+    <button class="tab" data-view="signals">Signals</button>
+    <button class="tab" data-view="history">Signal History</button>
+    <button class="tab" data-view="journal">Journal</button>
+    <button class="tab" data-view="backtest">Backtest</button>
+    <button class="tab" data-view="learn">Learn</button>
+  </nav>
+
+  <!-- Alert toasts: what fired, and the price to act at. -->
+  <div class="alert-toasts" id="alertToasts" aria-live="polite"></div>
+
+  <div class="signal-banner" id="signalBanner" hidden>
+    <div class="sb-main">
+      <span class="sb-dir" id="sbDir">BUY</span>
+      <div class="sb-titles">
+        <div class="sb-setup" id="sbSetup">—</div>
+        <div class="sb-status" id="sbStatus">—</div>
+      </div>
+    </div>
+    <div class="sb-metrics">
+      <div class="sb-metric"><span>Entry zone</span><b id="sbZone">—</b></div>
+      <div class="sb-metric"><span>Trigger</span><b id="sbTrigger">—</b></div>
+      <div class="sb-metric"><span>Invalidation</span><b id="sbInval">—</b></div>
+      <div class="sb-metric"><span>TP1</span><b id="sbTp1">—</b></div>
+      <div class="sb-metric"><span>R:R</span><b id="sbRr">—</b></div>
+      <div class="sb-metric"><span>Score</span><b id="sbScore">—</b></div>
+    </div>
+    <div class="sb-right">
+      <span class="sb-opportunity" id="sbOpportunity">—</span>
+      <span class="sb-conviction" id="sbConviction" title="Suggested size, not a probability">—</span>
+      <span class="sb-method" id="sbMethod" title="Whether this obeys the D1/H4 top-down bias">—</span>
+      <button class="sb-jump" id="sbJump" title="Show the full signal card">details</button>
+    </div>
+  </div>
+
+  <main>
+    <!-- ---------------------------------------------------------------- -->
+    <section class="view active" id="view-terminal">
+      <div class="terminal-grid">
+        <div class="chart-panel">
+          <div class="chart-toolbar">
+            <div class="tf-group" id="timeframeButtons">
+              <button data-tf="D1">D1</button>
+              <button data-tf="H4">H4</button>
+              <button data-tf="H1" class="active">H1</button>
+              <button data-tf="M30">M30</button>
+              <button data-tf="M15">M15</button>
+              <button data-tf="M5">M5</button>
+              <button data-tf="M1">M1</button>
+            </div>
+            <div class="layer-group" id="layerToggles">
+              <label><input type="checkbox" data-layer="ema" checked> EMA</label>
+              <label><input type="checkbox" data-layer="levels" checked> S/R</label>
+              <label><input type="checkbox" data-layer="zones" checked> Supply/Demand</label>
+              <label><input type="checkbox" data-layer="fvg" checked> FVG</label>
+              <label><input type="checkbox" data-layer="orderBlocks" checked> Order Blocks</label>
+              <label><input type="checkbox" data-layer="liquidity" checked> Liquidity</label>
+              <label><input type="checkbox" data-layer="structure" checked> BOS / CHoCH</label>
+              <label><input type="checkbox" data-layer="swings" checked> Swings</label>
+              <label><input type="checkbox" data-layer="fib"> Fibonacci</label>
+              <label><input type="checkbox" data-layer="vwap"> VWAP</label>
+              <label><input type="checkbox" data-layer="bollinger"> Bollinger</label>
+              <label><input type="checkbox" data-layer="rsi"> RSI</label>
+              <label><input type="checkbox" data-layer="macd"> MACD</label>
+            </div>
+          </div>
+          <div class="chart-host">
+            <canvas id="chart"></canvas>
+            <div class="chart-tooltip" id="chartTooltip" hidden></div>
+            <div class="chart-hint">drag to pan · scroll to zoom · double-click to reset</div>
+          </div>
+        </div>
+
+        <aside class="side-panel">
+          <div class="card signal-card" id="signalCard">
+            <h3>Signal suggestion</h3>
+            <div id="signalBody"><p class="muted">No setup is being tracked yet.</p></div>
+          </div>
+
+          <!-- The tape: everything between two M5 closes, aggregated from
+               raw ticks. Sits directly under the signal card because its
+               only job is to time the entry that card is proposing. -->
+          <div class="card tape-card" id="tapeCard">
+            <h3>The tape <span class="hint">seconds, from the raw tick stream</span></h3>
+            <div id="tapeBody"><p class="muted">—</p></div>
+          </div>
+
+          <div class="card" id="manageCard">
+            <h3>Open trade management <span class="hint">what to do now</span></h3>
+            <div id="manageBody"><p class="muted">No entry has filled yet.</p></div>
+          </div>
+
+          <div class="card" id="setupsCard">
+            <h3>All live setups <span class="badge" id="setupsCount">0</span></h3>
+            <ul class="setup-list" id="setupsList">
+              <li class="muted">nothing being tracked</li>
+            </ul>
+          </div>
+
+          <div class="card" id="resolvedCard">
+            <h3>Resolved today <span class="badge" id="resolvedCount">0</span></h3>
+            <div class="session-tape" id="sessionResults"></div>
+            <ul class="resolved-list" id="resolvedList">
+              <li class="muted">nothing has resolved yet</li>
+            </ul>
+          </div>
+
+          <div class="card">
+            <h3>Decision</h3>
+            <p class="headline" id="headline">Waiting for analysis…</p>
+            <div class="regime-row">
+              <span class="chip" id="regimeChip">regime —</span>
+              <span class="chip" id="biasChip">bias —</span>
+              <span class="chip" id="rrChip">R:R —</span>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Main reasons</h3>
+            <ol class="reasons" id="reasons"><li class="muted">—</li></ol>
+          </div>
+
+          <div class="card" id="waitingCard">
+            <h3>Waiting for</h3>
+            <ul class="waiting" id="waitingFor"><li class="muted">—</li></ul>
+          </div>
+
+          <div class="card">
+            <h3>Confirmation checklist</h3>
+            <ul class="checklist" id="checklist"></ul>
+          </div>
+
+          <div class="card">
+            <h3>Risk</h3>
+            <div class="kv"><span>Invalidation</span><b id="invalidation">—</b></div>
+            <div class="kv"><span>Targets</span><b id="targets">—</b></div>
+            <ul class="warnings" id="warnings"></ul>
+          </div>
+
+          <div class="card">
+            <h3>Live updates</h3>
+            <ul class="updates" id="updates"><li class="muted">no changes yet</li></ul>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <section class="view" id="view-analysis">
+      <div class="analysis-grid">
+        <div class="card wide">
+          <h3>Multi-timeframe read</h3>
+          <table class="table" id="dashboardTable">
+            <thead><tr><th>Analysis</th><th>Result</th><th>Detail</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="card wide">
+          <h3>Confluence breakdown</h3>
+          <div class="confluence" id="confluence"></div>
+        </div>
+
+        <div class="card wide">
+          <h3>AI analyst</h3>
+          <div class="explanation" id="explanation">Explanation will appear here.</div>
+          <button class="btn" id="regenerateBtn">Regenerate explanation</button>
+        </div>
+
+        <div class="card wide">
+          <h3>Ask the analyst</h3>
+          <div class="chat" id="chat"></div>
+          <form class="chat-form" id="chatForm">
+            <input type="text" id="chatInput" placeholder="Why WAIT? What confirms this setup? Where is the strongest demand?" autocomplete="off">
+            <button class="btn" type="submit">Ask</button>
+          </form>
+          <div class="quick-questions">
+            <button data-q="Why this decision?">Why this decision?</button>
+            <button data-q="What exactly am I waiting for?">What am I waiting for?</button>
+            <button data-q="What would invalidate this setup?">What invalidates it?</button>
+            <button data-q="Which timeframe is conflicting?">Which timeframe conflicts?</button>
+            <button data-q="Did Gold sweep liquidity?">Did Gold sweep liquidity?</button>
+            <button data-q="Is this a reversal?">Is this a reversal?</button>
+          </div>
+        </div>
+
+        <div class="card wide">
+          <h3>Analyse a chart screenshot</h3>
+          <p class="muted small">Upload a Gold chart image and the AI will read the visible structure, levels, and candles.</p>
+          <input type="file" id="chartImageInput" accept="image/png,image/jpeg,image/webp">
+          <div class="explanation" id="chartImageResult"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <section class="view" id="view-trader">
+      <div class="trader-grid">
+        <div class="card wide" id="deskCard">
+          <h3>The desk</h3>
+          <p class="headline" id="deskHeadline">Waiting for the first assessment…</p>
+          <div class="regime-row">
+            <span class="chip" id="deskSession">session —</span>
+            <span class="chip" id="deskCharacter">day —</span>
+            <span class="chip" id="deskConviction">conviction —</span>
+            <span class="chip" id="deskSize">size —</span>
+          </div>
+          <ul class="factors" id="deskFactors"></ul>
+        </div>
+
+        <div class="card">
+          <h3>Top-down method <span class="hint">D1/H4 direction, then execute lower</span></h3>
+          <div id="topdownBody"><p class="muted">—</p></div>
+        </div>
+
+        <div class="card">
+          <h3>Today's view</h3>
+          <div id="thesisBody"><p class="muted">No view has been written down yet.</p></div>
+        </div>
+
+        <div class="card">
+          <h3>Day character</h3>
+          <div id="characterBody"><p class="muted">—</p></div>
+        </div>
+
+        <div class="card">
+          <h3>Dollar context</h3>
+          <div id="macroBody"><p class="muted">—</p></div>
+        </div>
+
+        <div class="card">
+          <h3>This session so far</h3>
+          <div id="recordBody"><p class="muted">—</p></div>
+        </div>
+
+        <div class="card wide">
+          <h3>Your own record <span class="hint">what has actually worked, from closed setups</span></h3>
+          <div id="memoryBody"><p class="muted">—</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ----------------------------------------------------------------
+         The signal log.
+
+         Every signal every strategy has fired, written the moment it was
+         identified. Distinct from Signal History, which reports how setups
+         *finished*: a signal fired twenty minutes ago and still developing
+         belongs here and nowhere else. Times are the trader's own clock and
+         each row carries the session it fired in, because "14:37" and "London
+         open" are the two facts that place a call in the trading day.
+    -->
+    <section class="view" id="view-signals">
+      <div class="card wide">
+        <h3>Signal log
+          <span class="hint">every signal fired, with the time and session it fired in
+            (<span id="firedClockLabel">GMT+2</span>)</span>
+        </h3>
+        <div class="stats" id="firedStats"></div>
+
+        <div class="filters" id="firedDateFilters"></div>
+        <div class="filter-row">
+          <div class="filters" id="firedSideFilters">
+            <button class="filter active" data-side="">Both sides</button>
+            <button class="filter" data-side="bullish">BUY</button>
+            <button class="filter" data-side="bearish">SELL</button>
+          </div>
+          <div class="filters" id="firedOutcomeFilters">
+            <button class="filter active" data-outcome="">Any result</button>
+            <button class="filter" data-outcome="open">Still running</button>
+            <button class="filter" data-outcome="win">Won</button>
+            <button class="filter" data-outcome="loss">Lost</button>
+            <button class="filter" data-outcome="untaken">Never filled</button>
+          </div>
+          <div class="filters" id="firedSessionFilters"></div>
+        </div>
+
+        <table class="table fired-table" id="firedTable">
+          <thead><tr>
+            <th>Date</th><th>Fired</th><th>Session</th><th>Strategy</th>
+            <th>Dir</th><th>Entry zone</th><th>Stop</th><th>TP1</th>
+            <th>Pips on offer</th><th>R:R</th><th>Score</th>
+            <th>Status</th><th>Result</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="signal-breakdown">
+        <div class="card">
+          <h3>Signals by session <span class="hint">when this system finds things</span></h3>
+          <div id="firedBySession"><p class="muted">—</p></div>
+        </div>
+        <div class="card">
+          <h3>Signals by strategy <span class="hint">which patterns are firing</span></h3>
+          <div id="firedByStrategy"><p class="muted">—</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <section class="view" id="view-history">
+      <div class="card wide">
+        <h3>Setup results <span class="hint">every signal that has been decided</span></h3>
+        <div class="stats" id="outcomeStats"></div>
+        <table class="table" id="outcomesTable">
+          <thead><tr>
+            <th>Closed</th><th>Strategy</th><th>Dir</th><th>Entry</th><th>Exit</th>
+            <th>Why</th><th>Pips</th><th>R</th><th>Result</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card wide">
+        <h3>Strategy record <span class="hint">what each pattern has actually paid</span></h3>
+        <table class="table" id="strategyTable">
+          <thead><tr>
+            <th>Strategy</th><th>Family</th><th>Taken</th><th>W/L</th>
+            <th>Win rate</th><th>Avg R</th><th>Total pips</th><th>Live now</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card wide">
+        <h3>Decision history</h3>
+        <div class="filters">
+          <button class="filter active" data-filter="">All</button>
+          <button class="filter" data-filter="BUY">BUY</button>
+          <button class="filter" data-filter="SELL">SELL</button>
+          <button class="filter" data-filter="WAIT">WAIT</button>
+        </div>
+        <table class="table" id="signalsTable">
+          <thead><tr>
+            <th>Time</th><th>Price</th><th>Decision</th><th>Dir</th><th>Score</th>
+            <th>Regime</th><th>Invalidation</th><th>R:R</th><th>Result</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <section class="view" id="view-journal">
+      <div class="journal-grid">
+        <div class="card">
+          <h3>Record a decision</h3>
+          <form id="journalForm" class="form">
+            <label>Did you take the trade?
+              <select name="took_trade">
+                <option value="1">Yes — took it</option>
+                <option value="0">No — passed</option>
+              </select>
+            </label>
+            <label>Reason<textarea name="reason" rows="3" placeholder="Why you took it, or why you rejected it"></textarea></label>
+            <div class="form-row">
+              <label>Entry<input type="number" step="0.01" name="entry"></label>
+              <label>Stop loss<input type="number" step="0.01" name="stop_loss"></label>
+            </div>
+            <div class="form-row">
+              <label>Take profit<input type="number" step="0.01" name="take_profit"></label>
+              <label>Lots<input type="number" step="0.01" name="lot_size"></label>
+            </div>
+            <label>Notes<textarea name="notes" rows="2"></textarea></label>
+            <button class="btn" type="submit">Save entry</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h3>Behaviour</h3>
+          <div class="stats" id="journalStats"></div>
+        </div>
+
+        <div class="card wide">
+          <h3>Journal</h3>
+          <table class="table" id="journalTable">
+            <thead><tr>
+              <th>Time</th><th>Engine said</th><th>You</th><th>Entry</th><th>SL</th>
+              <th>TP</th><th>Result</th><th>P/L</th><th></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <section class="view" id="view-backtest">
+      <div class="card wide">
+        <h3>Backtest the framework</h3>
+        <p class="muted small">
+          Replays the loaded history through the same engines the live app uses. Every setup is
+          resolved forward against the invalidation level and the first objective.
+        </p>
+        <form class="form-inline" id="backtestForm">
+          <label>Profile <select name="profile" id="backtestProfile"></select></label>
+          <label>Clock <select name="timeframe"><option>M15</option><option>M5</option><option>H1</option></select></label>
+          <label>Step <input type="number" name="step" value="8" min="1" max="48" title="Evaluate every N candles"></label>
+          <button class="btn" type="submit">Run backtest</button>
+        </form>
+        <div id="backtestStatus" class="muted small"></div>
+        <div class="stats" id="backtestStats"></div>
+        <table class="table" id="backtestGroups">
+          <thead><tr><th>Segment</th><th>Setups</th><th>Wins</th><th>Win rate</th><th>Total R</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="card wide">
+        <h3>Saved backtests</h3>
+        <table class="table" id="backtestHistory">
+          <thead><tr><th>Run</th><th>Profile</th><th>Setups</th><th>Win rate</th><th>Profit factor</th><th>Total R</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <section class="view" id="view-learn">
+      <div class="card wide">
+        <h3>Learning mode</h3>
+        <p class="muted small">Understand the concepts behind the analysis — with a live example from the current chart where one exists.</p>
+        <div class="concept-buttons" id="conceptButtons"></div>
+        <div class="explanation" id="learnOutput">Pick a concept, or ask your own question below.</div>
+        <form class="chat-form" id="learnForm">
+          <input type="text" id="learnInput" placeholder="e.g. Why is this FVG significant?" autocomplete="off">
+          <button class="btn" type="submit">Explain</button>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <footer class="disclaimer">
+    Decision support only — this application never places, modifies, or closes trades, and a setup
+    score is the weight of technical evidence, not a probability of profit. Every decision is yours.
+  </footer>
+
+  <script src="/static/chart.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

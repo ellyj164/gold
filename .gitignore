@@ -1,0 +1,19 @@
+# Build artefacts
+build/
+dist/
+*.spec.bak
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+
+# Local runtime data (the trading database lives in ~/.goldassist, not here)
+*.log
+*.db
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
