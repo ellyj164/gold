@@ -252,7 +252,8 @@ def build(analysis: dict, decision: dict, profile, candidate=None,
     direction = candidate.direction if candidate is not None else decision["direction"]
     price = float(analysis["price"])
     context = _context_score(decision, direction)
-    conviction = float(candidate.conviction) if candidate is not None else context
+    conviction = (_seed_conviction(candidate.conviction) if candidate is not None
+                  else context)
     score = _blend(conviction, context,
                    candidate.alignment if candidate is not None else "either")
 
@@ -477,8 +478,23 @@ def merge(suggestion: Suggestion, candidate) -> None:
         "conviction": round(float(candidate.conviction), 1),
         "evidence": list(candidate.evidence)[:2],
     })
-    boost = min(6.0, float(candidate.conviction) * 0.08)
-    suggestion.conviction = min(100.0, suggestion.conviction + boost)
+    # Each confirmation takes a share of the *remaining* headroom rather than
+    # adding a flat amount and clamping.
+    #
+    # The old rule added up to six points per confirming strategy and clipped
+    # at 100. With thirty-two detectors several routinely agree on one setup,
+    # so conviction ratcheted to the ceiling and stuck there: a third of every
+    # setup ever recorded sits at exactly 100.0, and once two setups are both
+    # pinned at the ceiling the field can no longer rank them. Measured over
+    # the live record, conviction carried no information at all -- the
+    # better-than-median half returned -0.001R against -0.046R for the rest.
+    #
+    # Taking a share of the headroom is strictly increasing, orders setups by
+    # how much agreement they actually attracted, and approaches 100 without
+    # ever arriving, so the top of the scale stays a comparison rather than a
+    # collision.
+    boost = _headroom_gain(suggestion.conviction, candidate.conviction)
+    suggestion.conviction += boost
     suggestion.score = min(100.0, suggestion.score + boost)
     suggestion.quality = quality_of(suggestion.score)
     suggestion.peak_score = max(suggestion.peak_score, suggestion.score)
@@ -488,6 +504,44 @@ def merge(suggestion: Suggestion, candidate) -> None:
 
 
 # --- construction helpers ---------------------------------------------------
+
+
+# Share of the remaining headroom a perfect confirmation may claim. A
+# textbook agreeing strategy closes a quarter of the gap to 100; a mediocre
+# one closes proportionally less.
+CONFIRMATION_SHARE = 0.25
+
+# Where a single strategy's own read tops out once it seeds a suggestion.
+#
+# `base.mix` legitimately returns 100 for a textbook example of a pattern, and
+# that is the right answer to "how good an example of itself is this?". It is
+# the wrong answer to "how convinced am I?", because it leaves no room for the
+# thing that should separate two textbook setups: whether anything else
+# agrees. Reserving the top of the range for corroboration is what makes the
+# scale mean something.
+#
+# Applied here rather than inside `mix` on purpose. Every detector's
+# `min_conviction` gate is checked against the raw value in
+# `strategies.base.detect`, so compressing it there would quietly raise every
+# gate by four percent and start withholding setups -- which this application
+# is not permitted to do.
+SEED_CEILING = 96.0
+
+
+def _seed_conviction(value: float) -> float:
+    """A detector's own conviction, compressed to leave room for agreement."""
+    return max(0.0, min(100.0, float(value))) * (SEED_CEILING / 100.0)
+
+
+def _headroom_gain(current: float, candidate_conviction: float) -> float:
+    """How much a confirming strategy adds, given how convinced it is.
+
+    Diminishing by construction: the first confirmation on a 70 moves it ~7,
+    the fourth moves it ~3, and no finite number of them reaches 100.
+    """
+    headroom = max(0.0, 100.0 - current)
+    quality = max(0.0, min(1.0, candidate_conviction / 100.0))
+    return headroom * CONFIRMATION_SHARE * quality
 
 
 def _context_score(decision: dict, direction: str) -> float:

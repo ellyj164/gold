@@ -11,8 +11,10 @@ profitable discretionary trader from an accurate one:
 * Has this kind of setup worked for me?    -> :mod:`memory`
 * What do I do now that I am in?           -> :mod:`management`
 * Why is Gold moving?                      -> :mod:`macro`
+* Is this a monetary move or a haven one?  -> :mod:`intermarket`
+* What has actually paid, measured?        -> :mod:`expectancy`
 
-This module runs all six on every cycle and folds them into one answer: a
+This module runs all eight on every cycle and folds them into one answer: a
 conviction level, a suggested fraction of normal risk, and the reasoning behind
 both.
 
@@ -33,7 +35,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from . import (awareness, character, intermarket as intermarket_module,
+from . import (awareness, character, expectancy, intermarket as intermarket_module,
                macro as macro_module, management, sessions, topdown)
 from . import thesis as thesis_module
 from .memory import Memory, score_band
@@ -80,6 +82,11 @@ class TradingDesk:
         self._last_failure: dict | None = None
         self._memory_report = None
         self._memory_at: datetime | None = None
+        # The cleaned, deduplicated record sliced by strategy, session and
+        # weekday. Cached on the same clock as the memory report: both are
+        # full table scans and neither changes between setup closures.
+        self._expectancy = None
+        self._expectancy_at: datetime | None = None
         self._events: list[str] = []
 
     # -- the per-cycle assessment ------------------------------------------
@@ -106,10 +113,11 @@ class TradingDesk:
         view = self._thesis(analysis, decision, macro, profile, now)
         record = self._session_record(suggestion, now)
         recall = self._memory_verdict(suggestion, session, day, analysis)
+        edge = self._expectancy_cached()
         trade = self._manage_all(live, suggestion, analysis, profile)
 
         verdict = self._verdict(suggestion, session, day, view, recall, macro,
-                                method, cross)
+                                method, cross, edge, now)
 
         self.state = {
             "session": session.to_dict(),
@@ -119,6 +127,7 @@ class TradingDesk:
             "thesis": view.to_dict() if view else None,
             "macro": macro.to_dict() if macro else None,
             "intermarket": cross.to_dict() if cross else None,
+            "expectancy": edge.to_dict() if edge else None,
             "memory": recall,
             "management": trade,
             "verdict": verdict,
@@ -215,6 +224,19 @@ class TradingDesk:
             self._memory_at = now
         return self._memory_report
 
+    def _expectancy_cached(self):
+        now = datetime.now(timezone.utc)
+        stale = (self._expectancy_at is None
+                 or (now - self._expectancy_at).total_seconds() > MEMORY_REFRESH_SECONDS)
+        if stale or self._expectancy is None:
+            try:
+                self._expectancy = self.memory.expectancy_report()
+            except Exception:
+                log.warning("Could not read the expectancy record", exc_info=True)
+                self._expectancy = None
+            self._expectancy_at = now
+        return self._expectancy
+
     def _manage_all(self, live: list, primary, analysis: dict,
                     profile) -> dict:
         """Open, advance or retire a managed trade for every entered setup."""
@@ -267,7 +289,7 @@ class TradingDesk:
     # -- the composed answer -------------------------------------------------
 
     def _verdict(self, suggestion, session, day, view, recall, macro,
-                 method, cross=None) -> dict:
+                 method, cross=None, edge=None, now=None) -> dict:
         """Fold every input into one conviction and one suggested size.
 
         Conviction is advice about *how much*, never about *whether*. A setup
@@ -322,6 +344,20 @@ class TradingDesk:
                     apply("metals regime", 0.9, cross.headline)
                 elif cross.supports == suggestion.direction:
                     apply("metals regime", 1.05, cross.headline)
+
+            # When, measured rather than assumed.
+            #
+            # Every trading text asserts which sessions are best; this reads
+            # which ones have actually paid *this* system. Shrunk by sample
+            # size and capped at a tenth either way, because the clock is the
+            # weakest evidence in the building -- it should nudge a size, and
+            # it must never be able to halve one on eight trades.
+            if edge is not None:
+                weekday = (now or datetime.now(timezone.utc)).strftime("%A")
+                multiplier, notes = expectancy.context_multiplier(
+                    edge, session.name, weekday)
+                if abs(multiplier - 1.0) > 1e-9:
+                    apply("measured timing", multiplier, "; ".join(notes))
 
         conviction = max(0.05, min(1.3, conviction))
         risk_fraction, risk_label = _risk_for(conviction)

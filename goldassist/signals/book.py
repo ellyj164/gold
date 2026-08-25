@@ -37,6 +37,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from .. import strategies
+from ..trader import expectancy
 from . import engine as signal_engine
 from . import resolve
 from .engine import Suggestion
@@ -339,12 +340,16 @@ class SuggestionBook:
 
 
 def _edge_for(edge: dict, key: str) -> float:
-    """How much this strategy's own record should move its conviction."""
-    record = (edge or {}).get(key) or {}
-    if int(record.get("n", 0)) < EDGE_MIN_SAMPLE:
-        return 0.0
-    adjustment = float(record.get("avg_r", 0.0)) * 8.0
-    return max(-EDGE_LIMIT, min(EDGE_LIMIT, adjustment))
+    """How much this strategy's own record should move its conviction.
+
+    Delegates to :mod:`expectancy`, which shrinks the estimate toward "no
+    edge" by sample size. That replaces the old hard cliff at eight trades:
+    a strategy with seven contributed exactly nothing and with eight
+    contributed its full raw average, which is the wrong shape for evidence.
+    A shrunk estimate rises smoothly as the record earns it.
+    """
+    points, _ = expectancy.conviction_adjustment(edge, key)
+    return points
 
 
 def _tape_for(context, candidate) -> float:

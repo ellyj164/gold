@@ -19,6 +19,7 @@ Run with:  python -m tests.test_trader
 
 from __future__ import annotations
 
+import itertools
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -67,15 +68,34 @@ def temp_db() -> Database:
     return Database(path)
 
 
+_SEQUENCE = itertools.count()
+
+
 def outcome(**kwargs) -> dict:
+    """One recorded outcome, distinct from every other by default.
+
+    Each call steps the entry price and the fill time, because that is what
+    separate trades actually look like and the record cleaner now depends on
+    it: rows sharing a strategy, a direction, a price and a moment are the
+    signature of the double-instance bug, and are collapsed to one. A fixture
+    that stamped twenty trades at one price and one instant was describing
+    twenty copies of a single trade, not twenty trades.
+    """
+    nth = next(_SEQUENCE)
     base = {
         "signal_uid": "x", "created_at": _now(), "closed_at": _now(),
         "direction": "bullish", "setup_type": "pullback", "session": "london",
         "regime": "strong bullish trend", "day_verdict": "TRADE", "score": 75.0,
-        "quality": "Good", "entry": 4400.0, "invalidation": 4380.0, "tp1": 4430.0,
+        "quality": "Good", "entry": 4400.0 + nth, "invalidation": 4380.0 + nth,
+        "tp1": 4430.0 + nth,
         "entered": 1, "outcome": "win", "r_multiple": 1.5,
         "max_favourable_r": 1.8, "max_adverse_r": -0.3, "reason": "COMPLETED",
         "notes": "",
+        # A filled trade needs a fill price. `entered` alone is no longer the
+        # test anywhere: two pre-migration rows in the live database carry
+        # `entered = 1` with no fill, no exit and a fabricated +3.5R, and they
+        # are exactly what the fill-price rule exists to exclude.
+        "fill_price": 4400.0 + nth, "filled_at": _at(nth), "exit_price": 4430.0 + nth,
     }
     base.update(kwargs)
     return base
@@ -83,6 +103,11 @@ def outcome(**kwargs) -> dict:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _at(nth: int) -> str:
+    """A fill time ``nth`` hours back, so fixtures are ordered and distinct."""
+    return (datetime.now(timezone.utc) - timedelta(hours=nth)).isoformat()
 
 
 # --- sessions --------------------------------------------------------------

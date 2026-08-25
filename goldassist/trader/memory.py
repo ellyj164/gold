@@ -29,6 +29,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from . import expectancy
+
 # Below this, a group is reported but no conclusion is drawn from it.
 MIN_SAMPLE = 8
 # Above this, the record is described as established rather than early.
@@ -156,11 +158,17 @@ class Memory:
         self.db = db
 
     def rows(self, limit: int = 500) -> list[dict]:
-        """Setups that actually triggered and have since closed."""
-        return [
-            row for row in self.db.setup_outcomes(limit=limit)
-            if row.get("entered") and row.get("outcome") in ("win", "loss", "scratch")
-        ]
+        """Setups that actually filled and have since closed, deduplicated.
+
+        Both passes matter and both used to be missing. ``entered`` was the
+        old test and it admits two pre-migration rows with no fill price and
+        a fabricated +3.5R; the double-instance bug of 2026-08-20 wrote every
+        setup twice for two days, and counting the copies inflated the sample
+        while halving its apparent variance. :mod:`expectancy` owns both
+        rules so that every consumer sees the same cleaned record.
+        """
+        rows, _, _ = expectancy.clean(self.db.setup_outcomes(limit=limit))
+        return rows
 
     def strategy_edge(self, limit: int = 500) -> dict:
         """Per-strategy results, in the shape the setup book scores with.
@@ -177,11 +185,30 @@ class Memory:
                 "wins": row.wins,
                 "losses": row.losses,
                 "avg_r": round(row.avg_r, 3),
+                # The estimate the book actually weights on. A raw average
+                # over three trades is noise with a decimal point; shrinking
+                # it toward "no edge" in proportion to the sample is what
+                # lets a thin record contribute honestly instead of loudly.
+                "shrunk_r": round(expectancy.shrink(row.avg_r, row.n), 3),
                 "total_r": round(row.total_r, 2),
                 "win_rate": row.win_rate,
+                "status": ("measured" if row.n >= expectancy.MIN_SAMPLE
+                           else "emerging"),
                 "reliable": row.reliable,
             }
         return edge
+
+    def expectancy_report(self, limit: int = 500):
+        """The cleaned record, sliced by strategy, session, weekday and hour.
+
+        Reads the *raw* rows rather than :meth:`rows`, because the report
+        needs to say how many were excluded and why -- a cleaner that hides
+        its own corrections is indistinguishable from one that is broken.
+        """
+        from .. import strategies
+        known = {key: definition.name
+                 for key, definition in strategies.base.REGISTRY.items()}
+        return expectancy.build(self.db.setup_outcomes(limit=limit), known)
 
     def report(self, limit: int = 500) -> MemoryReport:
         rows = self.rows(limit)

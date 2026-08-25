@@ -656,6 +656,12 @@ class Database:
 
         Only setups that actually filled are counted. An idea that expired
         unfilled says nothing about whether the pattern works.
+
+        The test is ``fill_price IS NOT NULL``, not ``entered = 1``. Two rows
+        written before the schema migration carry ``entered = 1`` with no fill
+        price, no exit price and an r_multiple of +3.5, and they were the only
+        reason the recorded total ever read positive. A row without a fill
+        price is not a trade, whatever its flags say.
         """
         with self.connect() as conn:
             rows = conn.execute(
@@ -672,7 +678,8 @@ class Database:
                        AVG(result_pips)                       AS avg_pips,
                        SUM(result_pips)                       AS total_pips
                   FROM (SELECT * FROM setup_outcomes
-                         WHERE entered = 1 AND strategy IS NOT NULL
+                         WHERE fill_price IS NOT NULL AND strategy IS NOT NULL
+                           AND outcome IN ('win', 'loss', 'scratch')
                          ORDER BY closed_at DESC LIMIT ?)
                  GROUP BY strategy
                  ORDER BY n DESC
