@@ -42,8 +42,16 @@ hiddenimports = [
 ]
 
 # Packages whose data files, DLLs or dynamic imports need collecting whole.
+#
+# `tzdata` is here because Windows ships no IANA timezone database and
+# `zoneinfo` therefore reads one out of that package. `analysis/calendar_sync`
+# converts release times from US Eastern to UTC through it, which is what
+# makes the daylight-saving shift right -- 08:30 Eastern is 12:30 UTC in
+# October and 13:30 UTC in November. Without the data files bundled, the
+# import still succeeds and the *call* raises ZoneInfoNotFoundError, so this
+# is the kind of omission that only shows up in the packaged build.
 for package in ("uvicorn", "anthropic", "httpx", "httpcore", "certifi",
-                "fastapi", "starlette", "webview", "MetaTrader5"):
+                "fastapi", "starlette", "webview", "MetaTrader5", "tzdata"):
     try:
         pkg_datas, pkg_binaries, pkg_hidden = collect_all(package)
         datas += pkg_datas
