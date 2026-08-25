@@ -36,7 +36,8 @@ from .profile import StrategyProfile
 CATALOGUE = {
     "htf_alignment":     (18, "Higher-timeframe direction", ("higher_timeframe_alignment",)),
     "h1_structure":      (12, "Trading-timeframe structure", ()),
-    "location":          (20, "Price location", ("zone_location", "fvg_or_orderblock")),
+    "location":          (20, "Price location", ("zone_location", "fvg_or_orderblock",
+                                                 "value_area_location")),
     "liquidity_sweep":   (14, "Liquidity sweep", ("liquidity_event",)),
     "structure_confirm": (18, "Structure confirmation", ("structure_confirmation",)),
     "candles":           (8,  "Price-action confirmation", ("candle_confirmation",)),
@@ -312,7 +313,87 @@ def _location_components(analysis: dict, tfs: dict, direction: str) -> list[dict
                 ),
             })
 
+    # Volume profile: the value area and its shelves.
+    #
+    # The other three components all read price *shape* -- a zone, a block, a
+    # gap are all drawn from where price went. This one reads participation:
+    # the value-area edge is the boundary the market itself defended, and the
+    # POC is the price it keeps coming back to. Neither is visible to any
+    # other engine here, which is why the pillar was blind to it.
+    vp_component = _value_area_component(tfs, direction, price, atr_v)
+    if vp_component:
+        out.append(vp_component)
+
     return out
+
+
+# How far from a profile reference price still counts as "at" it, in ATR. The
+# same reach the zone components use for an area edge, since that is what a
+# value-area boundary behaves like.
+VALUE_REACH_ATR = 0.6
+
+
+def _value_area_component(tfs: dict, direction: str, price: float,
+                          atr_v: float) -> dict | None:
+    """Score price against the volume profile, best timeframe wins.
+
+    A long wants to be at the *low* side of value or below it -- bought where
+    the market considers price cheap. A short wants the high side. Sitting in
+    the middle of the value area is the one location a profile actively argues
+    against, and it scores nothing rather than a little.
+    """
+    best: tuple[float, str] | None = None
+
+    for tf in ("H4", "H1", "M15"):
+        vp = (tfs.get(tf, {}) or {}).get("volume_profile") or {}
+        if not vp.get("available"):
+            continue
+
+        edge = vp["val"] if direction == "bullish" else vp["vah"]
+        poc = vp["poc"]
+        reach = atr_v * VALUE_REACH_ATR
+
+        # Extended beyond the far side of value: the mean-reversion case, and
+        # the strongest thing a profile has to say about location.
+        beyond = (direction == "bullish" and price < vp["val"]) or \
+                 (direction == "bearish" and price > vp["vah"])
+        at_edge = abs(price - edge) <= reach
+        at_poc = abs(price - poc) <= reach
+
+        if beyond:
+            # The further outside value, the better the reversion case, up to
+            # a point -- past ~2 ATR it is a trend that has left value behind,
+            # not a stretched rubber band, so the score stops climbing.
+            excursion = abs(price - edge) / atr_v if atr_v else 0.0
+            fraction = min(0.95, 0.55 + excursion * 0.2)
+            detail = (f"{tf} price {excursion:.1f} ATR "
+                      f"{'below' if direction == 'bullish' else 'above'} the value area "
+                      f"({vp['val']:.2f}-{vp['vah']:.2f}), stretched away from fair value")
+        elif at_edge:
+            fraction = 0.75
+            detail = (f"{tf} at the value-area "
+                      f"{'low' if direction == 'bullish' else 'high'} "
+                      f"{edge:.2f}, the boundary the market defended")
+        elif at_poc:
+            # The POC is a magnet, not a turning point. It supports a
+            # continuation entry and argues against a reversal one.
+            fraction = 0.45
+            detail = f"{tf} at the point of control {poc:.2f}, the window's busiest price"
+        else:
+            continue
+
+        node = vp.get("nearest_high_volume_node")
+        if node is not None and abs(price - node) <= reach:
+            fraction = min(1.0, fraction + 0.15)
+            detail += f"; on the {node:.2f} volume shelf"
+
+        if best is None or fraction > best[0]:
+            best = (fraction, detail)
+
+    if best is None:
+        return None
+    return {"fraction": best[0], "conditions": ("value_area_location",),
+            "detail": best[1]}
 
 
 # --- penalties -------------------------------------------------------------

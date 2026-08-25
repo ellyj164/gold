@@ -33,6 +33,22 @@ TIMEFRAMES = ("D1", "H4", "H1", "M30", "M15", "M5", "M1")
 # exactly the window that matters, and has no place in a six-month replay.
 BACKTEST_TIMEFRAMES = ("D1", "H4", "H1", "M30", "M15", "M5")
 
+# How long each timeframe's candle lasts, in minutes.
+#
+# MetaTrader indexes a candle by its *open* time, which is the single most
+# dangerous thing to forget when replaying history: at 12:00 the D1 candle
+# indexed 00:00 is still forming, and its high, low and close describe the
+# whole day -- twelve hours of which have not happened yet. Comparing the
+# index against the replay clock at all (`index <= now`, or `index < now`)
+# therefore hands the engines the future. A candle is closed only once
+# `open + this duration` has passed, and that is the test to use.
+#
+# The live path never needs this because the forming candle is always the last
+# row, which `MarketFeed.frame` drops outright.
+TIMEFRAME_MINUTES = {
+    "D1": 1440, "H4": 240, "H1": 60, "M30": 30, "M15": 15, "M5": 5, "M1": 1,
+}
+
 # Timeframes that set the directional bias. Nothing below these may overrule
 # them; a setup that disagrees with both is counter-trend by definition.
 BIAS_TIMEFRAMES = ("D1", "H4")

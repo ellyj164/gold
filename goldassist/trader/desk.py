@@ -33,7 +33,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from . import awareness, character, macro as macro_module, management, sessions, topdown
+from . import (awareness, character, intermarket as intermarket_module,
+               macro as macro_module, management, sessions, topdown)
 from . import thesis as thesis_module
 from .memory import Memory, score_band
 from ..signals import states
@@ -60,6 +61,11 @@ class TradingDesk:
         self.db = db
         self.memory = Memory(db)
         self.dollar = macro_module.DollarContext(source) if source is not None else None
+        # The dollar answers "is Gold moving"; this answers "why, and will it
+        # last". Kept separate because the two degrade independently -- a
+        # broker can carry a dollar index and no silver, or the reverse.
+        self.intermarket = (intermarket_module.IntermarketContext(source)
+                            if source is not None else None)
 
         self.thesis: thesis_module.Thesis | None = None
         # One managed trade per entered setup, keyed by suggestion id. An
@@ -96,13 +102,14 @@ class TradingDesk:
         day = character.assess(analysis, frames, session)
         method = topdown.assess(analysis, suggestion)
         macro = self._macro(frames)
+        cross = self._intermarket(frames)
         view = self._thesis(analysis, decision, macro, profile, now)
         record = self._session_record(suggestion, now)
         recall = self._memory_verdict(suggestion, session, day, analysis)
         trade = self._manage_all(live, suggestion, analysis, profile)
 
         verdict = self._verdict(suggestion, session, day, view, recall, macro,
-                                method)
+                                method, cross)
 
         self.state = {
             "session": session.to_dict(),
@@ -111,6 +118,7 @@ class TradingDesk:
             "record": record.to_dict(),
             "thesis": view.to_dict() if view else None,
             "macro": macro.to_dict() if macro else None,
+            "intermarket": cross.to_dict() if cross else None,
             "memory": recall,
             "management": trade,
             "verdict": verdict,
@@ -128,6 +136,15 @@ class TradingDesk:
             return self.dollar.read(frames.get("D1") if frames else None)
         except Exception:
             log.warning("Dollar context failed", exc_info=True)
+            return None
+
+    def _intermarket(self, frames: dict):
+        if self.intermarket is None:
+            return None
+        try:
+            return self.intermarket.read(frames.get("D1") if frames else None)
+        except Exception:
+            log.warning("Intermarket context failed", exc_info=True)
             return None
 
     def _thesis(self, analysis: dict, decision: dict, macro, profile, now):
@@ -250,7 +267,7 @@ class TradingDesk:
     # -- the composed answer -------------------------------------------------
 
     def _verdict(self, suggestion, session, day, view, recall, macro,
-                 method) -> dict:
+                 method, cross=None) -> dict:
         """Fold every input into one conviction and one suggested size.
 
         Conviction is advice about *how much*, never about *whether*. A setup
@@ -294,6 +311,17 @@ class TradingDesk:
                     apply("dollar context", 0.9, macro.headline)
                 elif macro.supports == suggestion.direction:
                     apply("dollar context", 1.05, macro.headline)
+
+            # The metals regime. A haven-driven rally is the case this exists
+            # to catch: the Gold chart cannot distinguish it from a monetary
+            # one, and it is the less durable of the two.
+            if cross is not None and cross.available:
+                if cross.regime == "fear" and suggestion.direction == "bullish":
+                    apply("metals regime", 0.85, cross.headline)
+                elif cross.supports == "conflicted":
+                    apply("metals regime", 0.9, cross.headline)
+                elif cross.supports == suggestion.direction:
+                    apply("metals regime", 1.05, cross.headline)
 
         conviction = max(0.05, min(1.3, conviction))
         risk_fraction, risk_label = _risk_for(conviction)

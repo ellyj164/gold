@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 
 from ..analysis import mtf
-from ..config import BACKTEST_TIMEFRAMES
+from ..config import BACKTEST_TIMEFRAMES, TIMEFRAME_MINUTES
 from ..decision import engine as decision_engine
 from ..decision.profile import StrategyProfile
 from ..signals import SuggestionBook
@@ -221,7 +221,7 @@ def run(frames: dict[str, pd.DataFrame], profile: StrategyProfile,
         try:
             result = book.sync(
                 analysis, decision, profile,
-                bars=_resolution_slice(resolution_frame, now),
+                bars=_resolution_slice(resolution_frame, now, resolution_tf),
                 frames=sliced,
                 now=now.to_pydatetime(),
             )
@@ -317,13 +317,21 @@ def _slice_frames(frames: dict[str, pd.DataFrame], now: pd.Timestamp) -> dict | 
 
     This is what keeps the replay honest: no engine ever sees a candle from the
     future, and higher timeframes only advance when their own candle closes.
+
+    The test is on the candle's *close* time, not its index. MetaTrader labels
+    a candle with the moment it opened, so at 12:00 the D1 candle indexed
+    00:00 is still forming and its OHLC covers the entire day -- half of it
+    unwritten. Filtering on the index (either `<= now` or `< now`) admits that
+    candle and leaks up to a full timeframe of future data into every engine,
+    which is exactly the bug this function was written to prevent and did not.
     """
     out = {}
     for tf in BACKTEST_TIMEFRAMES:
         df = frames.get(tf)
         if df is None:
             continue
-        visible = df.loc[df.index <= now]
+        closes_at = df.index + pd.Timedelta(minutes=TIMEFRAME_MINUTES.get(tf, 1))
+        visible = df.loc[closes_at <= now]
         if len(visible) < 60:
             return None
         # Only the tail matters to the engines; slicing it here is what makes
@@ -332,15 +340,23 @@ def _slice_frames(frames: dict[str, pd.DataFrame], now: pd.Timestamp) -> dict | 
     return out or None
 
 
-def _resolution_slice(frame: pd.DataFrame, now: pd.Timestamp) -> pd.DataFrame | None:
-    """Candles the resolver may see at this step: everything up to ``now``.
+def _resolution_slice(frame: pd.DataFrame, now: pd.Timestamp,
+                      timeframe: str) -> pd.DataFrame | None:
+    """Candles the resolver may see at this step: those closed by ``now``.
 
     The resolver itself skips anything it has already walked and anything older
     than the setup, so handing it a trailing window is both correct and cheap.
+
+    Same open-time trap as :func:`_slice_frames`, and worse here: the candle
+    indexed exactly ``now`` has not begun, so admitting it lets the resolver
+    fill an entry or hit a stop on a bar that does not exist yet. Live
+    resolution reads ``tracking_frame(closed_only=True)``, which drops the
+    forming bar; this is the replay's equivalent.
     """
     if frame is None or frame.empty:
         return None
-    visible = frame.loc[frame.index <= now]
+    closes_at = frame.index + pd.Timedelta(minutes=TIMEFRAME_MINUTES.get(timeframe, 1))
+    visible = frame.loc[closes_at <= now]
     if visible.empty:
         return None
     return visible.iloc[-RESOLUTION_BARS:]

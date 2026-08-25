@@ -29,7 +29,7 @@ import pandas as pd
 
 from ..config import TIMEFRAMES
 from . import (candlesticks, events, fvg, indicators, levels, liquidity, orderblocks,
-               regime, structure, zones)
+               regime, structure, volumeprofile, zones)
 
 TIMEFRAME_ROLE = {
     "D1": "macro context",
@@ -46,6 +46,18 @@ TIMEFRAME_ROLE = {
 # M1 uses the strongest fractal of all: at that resolution a 2-bar swing is
 # noise, and the point of reading M1 is to catch the few moves that are not.
 SWING_STRENGTH = {"D1": 3, "H4": 3, "H1": 2, "M30": 2, "M15": 2, "M5": 2, "M1": 4}
+
+# Timeframes that carry a volume profile.
+#
+# A profile answers "where has this market been traded lately", and "lately"
+# has to mean something. 480 M15 candles is five trading days -- the week the
+# market is currently in. 480 D1 candles is two years, which describes a Gold
+# that no longer exists and would anchor a POC hundreds of dollars away.
+#
+# H1 and M15 are the two that matter: H1 frames the swing the trade sits in,
+# M15 frames the session. M5 and below add nothing a profile can say that the
+# tape does not say faster, and cost a histogram per cycle.
+PROFILE_TIMEFRAMES = ("H4", "H1", "M15")
 
 
 def analyse_timeframe(df: pd.DataFrame, timeframe: str) -> dict:
@@ -72,6 +84,11 @@ def analyse_timeframe(df: pd.DataFrame, timeframe: str) -> dict:
     )
     patterns = candlesticks.detect(df)
 
+    # Where the market actually traded, as distinct from where it went. The
+    # profile is only read on the timeframes whose window describes the market
+    # being traded now -- a D1 profile over 480 days is a different instrument.
+    profile = (volumeprofile.build(df) if timeframe in PROFILE_TIMEFRAMES else None)
+
     return {
         "timeframe": timeframe,
         "role": TIMEFRAME_ROLE.get(timeframe, ""),
@@ -85,6 +102,10 @@ def analyse_timeframe(df: pd.DataFrame, timeframe: str) -> dict:
         "order_blocks": orderblocks.summarise(blocks, price, atr_value),
         "zones": zones.summarise(zn, price, atr_value),
         "candles": candlesticks.summarise(patterns, context_levels, atr_value * 0.3),
+        "volume_profile": volumeprofile.summarise(profile, price, atr_value),
+        # The raw histogram is kept separately: the chart draws it, and the
+        # summary above is what every decision path reads.
+        "volume_profile_raw": profile,
         "bias": _timeframe_bias(ind, struct),
     }
 
