@@ -3,7 +3,7 @@ REM Build the desktop application and its Windows installer.
 REM
 REM Produces:
 REM   dist\GoldAssistant\GoldAssistant.exe        portable one-folder build
-REM   dist\GoldAssistant-Setup-1.1.0.exe          installer
+REM   dist\GoldAssistant-Setup-<version>.exe      installer
 REM
 REM Run from the project root:   packaging\build.bat
 
@@ -17,6 +17,16 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
 )
 
+REM The version is defined once, in goldassist/__init__.py, and read from
+REM there. It used to be typed separately here, in installer.iss and in two
+REM echo lines, which is four places to forget.
+for /f %%V in ('".venv\Scripts\python.exe" -c "import goldassist; print(goldassist.__version__)"') do set "APPVER=%%V"
+if "%APPVER%"=="" (
+    echo ERROR: could not read the version from goldassist/__init__.py
+    exit /b 1
+)
+echo Building Gold Decision Assistant %APPVER%
+
 echo.
 echo [1/5] Checking build tools...
 ".venv\Scripts\python.exe" -c "import PyInstaller" 2>nul
@@ -29,7 +39,7 @@ echo.
 echo [2/5] Running the test suites...
 REM Never package a build that cannot pass its own behaviour tests. Each suite
 REM pins behaviour that has been broken by accident before.
-for %%T in (test_engines test_signals test_trader test_resolution) do (
+for %%T in (test_engines test_signals test_trader test_resolution test_timeline test_analysis_v12) do (
     ".venv\Scripts\python.exe" -m tests.%%T >nul
     if errorlevel 1 (
         echo ERROR: tests.%%T failed. Run it directly to see which check broke:
@@ -48,7 +58,24 @@ if errorlevel 1 (
 )
 
 echo.
-echo [4/5] Building the installer...
+echo [4/5] Verifying the packaged application...
+REM Runs BEFORE the installer, not after.
+REM
+REM This step used to be [5/5]. When Inno Setup is absent -- as it is on the
+REM development machine -- step 4 exited with success and took the smoke test
+REM with it, so the one gate that catches windowed-build-only failures never
+REM ran on the only machine that builds. Those failures (a null sys.stdout
+REM under --noconsole crashing uvicorn's log formatter) appear in
+REM GoldAssistant.exe and never in GoldAssistant-debug.exe, which is exactly
+REM what the smoke test checks and exactly what a skipped step hides.
+".venv\Scripts\python.exe" -m tests.test_packaged
+if errorlevel 1 (
+    echo ERROR: the packaged application failed its smoke test.
+    exit /b 1
+)
+
+echo.
+echo [5/5] Building the installer...
 
 REM Inno Setup installs to a different place depending on how it was obtained.
 set "ISCC="
@@ -60,8 +87,7 @@ if "%ISCC%"=="" (
     echo       Inno Setup not found - skipping the installer.
     echo       Install it with:  winget install JRSoftware.InnoSetup
     echo.
-    echo       The portable build is ready at: dist\GoldAssistant\
-    exit /b 0
+    echo       The portable build is ready and smoke-tested at: dist\GoldAssistant    exit /b 0
 )
 
 "%ISCC%" packaging\installer.iss
@@ -71,16 +97,8 @@ if errorlevel 1 (
 )
 
 echo.
-echo [5/5] Verifying the packaged application...
-".venv\Scripts\python.exe" -m tests.test_packaged
-if errorlevel 1 (
-    echo ERROR: the packaged application failed its smoke test.
-    exit /b 1
-)
-
-echo.
 echo Done.
 echo   Portable : dist\GoldAssistant\GoldAssistant.exe
-echo   Installer: dist\GoldAssistant-Setup-1.1.0.exe
+echo   Installer: dist\GoldAssistant-Setup-%APPVER%.exe
 echo.
 endlocal

@@ -127,6 +127,61 @@ def detect(df: pd.DataFrame, lookback: int = 12) -> list[CandlePattern]:
             add("exhaustion candle", direction, 0.5,
                 f"{range_atr:.1f}x ATR range but small body - momentum failing")
 
+        # --- harami -------------------------------------------------------
+        # The mirror of engulfing: a small candle contained inside the prior
+        # body. Engulfing says the new side overwhelmed the old one; harami
+        # says the old side simply stopped, which is the earlier and weaker
+        # of the two warnings and is scored accordingly.
+        prev_top = max(o[i - 1], c[i - 1])
+        prev_bottom = min(o[i - 1], c[i - 1])
+        prev_body_atr = _f(m["body_atr"].iloc[i - 1]) or 0
+        if (prev_body_atr >= 0.8 and body_atr and body_atr < prev_body_atr * 0.6
+                and max(o[i], c[i]) <= prev_top and min(o[i], c[i]) >= prev_bottom):
+            if c[i - 1] < o[i - 1] and bull:
+                add("bullish harami", BULLISH, 0.4,
+                    "small body inside a large bearish one - selling has stalled")
+            elif c[i - 1] > o[i - 1] and not bull:
+                add("bearish harami", BEARISH, 0.4,
+                    "small body inside a large bullish one - buying has stalled")
+
+        # --- piercing line and dark cloud cover ---------------------------
+        # Half-measures of engulfing: the close reclaims more than half of the
+        # prior body without covering it entirely.
+        prev_body = _f(m["body"].iloc[i - 1]) or 0
+        if prev_body and prev_body_atr >= 0.7:
+            midpoint = (o[i - 1] + c[i - 1]) / 2
+            if (c[i - 1] < o[i - 1] and bull
+                    and o[i] < l[i - 1] and midpoint < c[i] < o[i - 1]):
+                add("piercing line", BULLISH, 0.5,
+                    "opened below the prior low and closed back above its midpoint")
+            elif (c[i - 1] > o[i - 1] and not bull
+                    and o[i] > h[i - 1] and o[i - 1] < c[i] < midpoint):
+                add("dark cloud cover", BEARISH, 0.5,
+                    "opened above the prior high and closed back below its midpoint")
+
+        # --- tweezers -----------------------------------------------------
+        # Two candles rejecting from the same price. The tolerance is a
+        # fraction of ATR rather than an exact match, because an exact tick
+        # match is a coincidence and "the same level twice" is the pattern.
+        tick = (_f(m["atr"].iloc[i]) or 0) * 0.08
+        if tick > 0 and i >= 1:
+            if abs(l[i] - l[i - 1]) <= tick and lower and lower > 0.35:
+                add("tweezer bottom", BULLISH, 0.45,
+                    "two candles rejecting from the same low")
+            if abs(h[i] - h[i - 1]) <= tick and upper and upper > 0.35:
+                add("tweezer top", BEARISH, 0.45,
+                    "two candles rejecting from the same high")
+
+        # --- marubozu and spinning top ------------------------------------
+        if body_pct and body_pct > 0.9 and body_atr and body_atr >= 0.8:
+            add(f"{'bullish' if bull else 'bearish'} marubozu",
+                BULLISH if bull else BEARISH, 0.55,
+                "almost no wick - one side controlled the entire candle")
+        if (body_pct and body_pct < 0.3 and upper and lower
+                and upper > 0.3 and lower > 0.3):
+            add("spinning top", NEUTRAL, 0.25,
+                "small body between two wicks - balance, not direction")
+
         # --- three-candle stars -------------------------------------------
         if i >= 2:
             first_bear = c[i - 2] < o[i - 2]
@@ -138,6 +193,47 @@ def detect(df: pd.DataFrame, lookback: int = 12) -> list[CandlePattern]:
                 add("morning star", BULLISH, 0.6, "three-candle bullish reversal formation")
             if first_bull and mid_small and not bull and c[i] < midpoint_prev:
                 add("evening star", BEARISH, 0.6, "three-candle bearish reversal formation")
+
+        # --- three soldiers and three crows -------------------------------
+        # Three real bodies marching the same way, each closing beyond the
+        # last. The strongest continuation formation in the classical
+        # vocabulary and the one most often confused with exhaustion, so the
+        # note says which it is only when the bodies are not shrinking.
+        if i >= 2:
+            bodies = [_f(m["body_atr"].iloc[j]) or 0 for j in (i - 2, i - 1, i)]
+            fills = [_f(m["body_pct"].iloc[j]) or 0 for j in (i - 2, i - 1, i)]
+            if all(b >= 0.5 for b in bodies) and all(f > 0.55 for f in fills):
+                rising = all(c[j] > o[j] for j in (i - 2, i - 1, i)) and \
+                    c[i] > c[i - 1] > c[i - 2]
+                falling = all(c[j] < o[j] for j in (i - 2, i - 1, i)) and \
+                    c[i] < c[i - 1] < c[i - 2]
+                fading = bodies[2] < bodies[0] * 0.6
+                if rising:
+                    add("three white soldiers", BULLISH, 0.5 if fading else 0.65,
+                        "three strong bullish closes in a row"
+                        + (" but the bodies are shrinking - buying is tiring"
+                           if fading else ""))
+                elif falling:
+                    add("three black crows", BEARISH, 0.5 if fading else 0.65,
+                        "three strong bearish closes in a row"
+                        + (" but the bodies are shrinking - selling is tiring"
+                           if fading else ""))
+
+        # --- three inside up / down ---------------------------------------
+        # A harami that then confirmed. The confirmation is the whole point:
+        # a harami alone is a stall, a harami followed through is a turn.
+        if i >= 2:
+            two_top = max(o[i - 2], c[i - 2])
+            two_bottom = min(o[i - 2], c[i - 2])
+            inside = (max(o[i - 1], c[i - 1]) <= two_top
+                      and min(o[i - 1], c[i - 1]) >= two_bottom)
+            if inside and (_f(m["body_atr"].iloc[i - 2]) or 0) >= 0.8:
+                if c[i - 2] < o[i - 2] and bull and c[i] > two_top:
+                    add("three inside up", BULLISH, 0.6,
+                        "a bullish harami confirmed by a close above it")
+                elif c[i - 2] > o[i - 2] and not bull and c[i] < two_bottom:
+                    add("three inside down", BEARISH, 0.6,
+                        "a bearish harami confirmed by a close below it")
 
         # --- breakout and failed breakout ---------------------------------
         window_high = h[max(0, i - 20):i].max() if i > 0 else h[i]

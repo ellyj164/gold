@@ -438,6 +438,39 @@ def _penalties(analysis: dict, direction: str, profile: StrategyProfile) -> list
             "warning",
         ))
 
+    # Buying at a premium, or selling at a discount.
+    #
+    # The cheapest mistake in the book and the one the score could not see: a
+    # textbook bullish setup at 90% of the dealing range scored exactly as
+    # well as the same setup at 20%, because every location engine measured
+    # price against a *pattern* and none measured it against the range. The
+    # pattern can be perfect and the price still bad.
+    #
+    # Read from H1 and H4 only. Below that the "range" is an hour of noise and
+    # its midpoint is not a level anyone is trading against.
+    for tf in ("H4", "H1"):
+        band = (tfs.get(tf, {}) or {}).get("dealing_range") or {}
+        if not band.get("available") or band.get("zone") == "equilibrium":
+            continue
+        if band.get("favours") in (direction, "neutral"):
+            continue
+        # How deep into the wrong half, 0..1, so the penalty scales with how
+        # bad the price is rather than switching on at the midpoint.
+        position = float(band.get("position", 0.5))
+        depth = (position - 0.5) * 2 if direction == "bullish" else (0.5 - position) * 2
+        if depth <= 0:
+            continue
+        out.append(Penalty(
+            "premium_discount",
+            "Buying at a premium" if direction == "bullish" else "Selling at a discount",
+            min(9.0, depth * 11.0),
+            f"{tf} price is {position * 100:.0f}% of the "
+            f"{band['low']:.2f}-{band['high']:.2f} range, the wrong half for a "
+            f"{direction} entry (equilibrium {band['equilibrium']:.2f})",
+            "critical" if depth > 0.6 else "warning",
+        ))
+        break
+
     # Volatility extremes make entries unreliable on Gold.
     h1 = tfs.get("H1", {})
     atr_info = (h1.get("indicators") or {}).get("atr", {})

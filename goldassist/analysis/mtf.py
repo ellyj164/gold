@@ -28,8 +28,8 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from ..config import TIMEFRAMES
-from . import (candlesticks, events, fvg, indicators, levels, liquidity, orderblocks,
-               regime, structure, volumeprofile, zones)
+from . import (arrays, candlesticks, events, fvg, indicators, levels, liquidity,
+               orderblocks, regime, structure, volumeprofile, zones)
 
 TIMEFRAME_ROLE = {
     "D1": "macro context",
@@ -89,6 +89,12 @@ def analyse_timeframe(df: pd.DataFrame, timeframe: str) -> dict:
     # being traded now -- a D1 profile over 480 days is a different instrument.
     profile = (volumeprofile.build(df) if timeframe in PROFILE_TIMEFRAMES else None)
 
+    # Premium/discount and breakers, read off the swings `structure` just
+    # found. Both answer "is this a good price", which no other engine here
+    # asks -- they judge location against the range rather than against a
+    # pattern.
+    breakers = arrays.detect_breakers(df, struct["swings"])
+
     return {
         "timeframe": timeframe,
         "role": TIMEFRAME_ROLE.get(timeframe, ""),
@@ -106,6 +112,8 @@ def analyse_timeframe(df: pd.DataFrame, timeframe: str) -> dict:
         # The raw histogram is kept separately: the chart draws it, and the
         # summary above is what every decision path reads.
         "volume_profile_raw": profile,
+        "dealing_range": arrays.dealing_range(struct["swings"], price, atr_value),
+        "breakers": arrays.summarise(breakers, price, atr_value),
         "bias": _timeframe_bias(ind, struct),
     }
 
