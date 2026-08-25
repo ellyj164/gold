@@ -94,7 +94,8 @@ if "%ISCC%"=="" (
     echo       Inno Setup not found - skipping the installer.
     echo       Install it with:  winget install JRSoftware.InnoSetup
     echo.
-    echo       The portable build is ready and smoke-tested at: dist\GoldAssistant    exit /b 0
+    echo       The portable build is ready and smoke-tested at: dist\GoldAssistant\
+    exit /b 0
 )
 
 "%ISCC%" packaging\installer.iss

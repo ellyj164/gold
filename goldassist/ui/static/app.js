@@ -661,10 +661,18 @@
           method: "POST", body: JSON.stringify(payload),
         });
         fillAiPanel(saved);
-        say(saved.active === "online"
-              ? `Saved. Analysis is online via ${provider}.`
-              : `Saved. Analysis is offline${saved.note ? " — " + saved.note : "."}`,
-            saved.active === "online" || saved.mode === "offline");
+        // Three outcomes, and they must read differently. Online working is
+        // a success; offline *by choice* is equally a success and must not be
+        // reported with a complaint about a missing key; online that silently
+        // fell back to offline is the one case that needs explaining.
+        if (saved.active === "online") {
+          say(`Saved. Analysis is online via ${provider}.`, true);
+        } else if (saved.mode === "offline") {
+          say("Saved. Analysis is offline — the engine's own analyst, "
+              + "reading the live feed.", true);
+        } else {
+          say(`Saved, but analysis is still offline. ${saved.note || ""}`, false);
+        }
       } catch (err) { say(err.message, false); }
     });
   }

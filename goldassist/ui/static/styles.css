@@ -1091,8 +1091,18 @@ li.resolved.untaken .verdict { color: var(--muted); }
    badge must not imply a model is answering when none is. */
 .ai-badge.degraded { color: var(--bear); border-color: var(--bear); }
 
-.btn.tiny { font-size: 10px; padding: 3px 9px; margin-left: 6px; vertical-align: middle; }
-.btn.ghost { background: transparent; }
+/* The card heading is muted uppercase, so a button inheriting that colour
+   inside it disappears — and this one is the only way into the provider
+   settings. It needs to read as a control, not as more heading. */
+.btn.tiny {
+  font-size: 10px; padding: 3px 10px; margin-left: 8px;
+  vertical-align: middle; text-transform: none; letter-spacing: 0;
+}
+.btn.ghost {
+  background: transparent; color: var(--accent);
+  border: 1px solid var(--border);
+}
+.btn.ghost:hover { border-color: var(--accent); background: rgba(90, 160, 255, 0.08); }
 
 .ai-settings {
   border: 1px solid var(--border); border-radius: 8px;
