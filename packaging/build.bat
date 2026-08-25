@@ -20,7 +20,14 @@ if not exist ".venv\Scripts\python.exe" (
 REM The version is defined once, in goldassist/__init__.py, and read from
 REM there. It used to be typed separately here, in installer.iss and in two
 REM echo lines, which is four places to forget.
-for /f %%V in ('".venv\Scripts\python.exe" -c "import goldassist; print(goldassist.__version__)"') do set "APPVER=%%V"
+REM Via a temp file rather than `for /f`. The command needs quotes around both
+REM the interpreter path (it contains spaces) and the -c argument, and every
+REM form of `for /f` quoting mangles one or the other -- the plain ('...')
+REM form splits the path at its first space. Writing and reading a file has
+REM no quoting rules to get wrong.
+".venv\Scripts\python.exe" -c "import goldassist; print(goldassist.__version__)" > "%TEMP%\goldassist-version.txt"
+set /p APPVER=<"%TEMP%\goldassist-version.txt"
+del "%TEMP%\goldassist-version.txt" >nul 2>&1
 if "%APPVER%"=="" (
     echo ERROR: could not read the version from goldassist/__init__.py
     exit /b 1
