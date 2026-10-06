@@ -13,8 +13,9 @@ from __future__ import annotations
 MIN_TARGET_ATR = 0.75
 
 # XAUUSD pip convention, mirrored from goldassist.signals.opportunity so the
-# risk module has no dependency on the signal layer.
-PIP_SIZE = 0.10
+# risk module has no dependency on the signal layer. 1 pip = 0.01 of price,
+# so 500 pips is a 5.00 ($5) move.
+PIP_SIZE = 0.01
 
 
 def assess(analysis: dict, direction: str) -> dict:

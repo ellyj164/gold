@@ -35,8 +35,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-# XAUUSD pip convention, matching signals/opportunity.py.
-PIP = 0.10
+# XAUUSD pip convention, matching signals/opportunity.py: 1 pip = 0.01 of
+# price, so 500 pips is a 5.00 ($5) move.
+PIP = 0.01
 
 # The sub-minute ladder. Five seconds is about as fine as Gold's tick stream
 # stays meaningful on a retail feed; thirty gives the slowest of the three
@@ -49,7 +50,7 @@ MICRO_BARS = 180
 
 # A spread this many times its own recent median counts as widened. Gold's
 # spread routinely doubles around a release, and entering into that is how a
-# 50-pip target quietly becomes a 44-pip one.
+# 500-pip target quietly becomes a 440-pip one.
 #
 # Measured against the window's own median rather than a fixed number, which
 # has one consequence worth naming: a spread that has been wide for the whole
@@ -133,7 +134,7 @@ def read(ticks: pd.DataFrame, atr: float = 0.0) -> dict:
         velocity = 0.0
 
     # Distance actually covered versus ground travelled: a market that moved
-    # 40 pips in a straight line and one that moved 40 pips back and forth to
+    # 400 pips in a straight line and one that moved 400 pips back and forth to
     # end where it started are not the same tape.
     path = float(mid.diff().abs().sum()) / PIP
     net = abs(float(mid.iloc[-1] - mid.iloc[0])) / PIP
@@ -224,13 +225,13 @@ def agrees(reading: dict, direction: str) -> float | None:
 
 def _normalise(move: float, atr: float) -> float:
     """A price move as a -1..+1 push, scaled to the day's own volatility."""
-    scale = max(atr * 0.25, PIP * 8) if atr else PIP * 8
+    scale = max(atr * 0.25, PIP * 80) if atr else PIP * 80
     return float(max(-1.0, min(1.0, move / scale)))
 
 
 def _speed_label(pips_per_minute: float, atr: float) -> str:
     # An ATR's worth of movement inside a minute is violent on any timeframe.
-    fast = max((atr / PIP) * 0.35, 12.0) if atr else 12.0
+    fast = max((atr / PIP) * 0.35, 120.0) if atr else 120.0
     if pips_per_minute >= fast:
         return "fast"
     if pips_per_minute >= fast * 0.4:
@@ -246,7 +247,7 @@ def _describe(velocity, thrust, efficiency, spread_ratio, activity) -> tuple[str
         return ("wide spread",
                 f"spread is {spread_ratio:.1f}x its normal width — entry costs "
                 "more than the measured levels suggest")
-    if abs(thrust) < 0.15 and abs(velocity) < 4:
+    if abs(thrust) < 0.15 and abs(velocity) < 40:
         return ("quiet", "the tape is quiet; nothing is being pushed right now")
     if efficiency < 0.25:
         return ("churning",

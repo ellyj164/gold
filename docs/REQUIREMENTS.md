@@ -96,33 +96,36 @@ Does not execute trades. Must never force a signal when conditions are unclear.
 
 ---
 
-## 3. 50-pip minimum opportunity rule
+## 3. 500-pip minimum opportunity rule
 
 **Received:** after the Signal Suggestion Module was delivered.
+**Amended:** the trader clarified the intended size — *"500 pips or $5 move and
+above is the real set up"* — fixing the pip convention at 1 pip = 0.01 and the
+floor at 500 pips. The qualifying move in price is **5.00 ($5)**, as before.
 
-Optimises the module for **day trading**, where 50 pips is a strong minimum
+Optimises the module for **day trading**, where 500 pips is a strong minimum
 target for a valid intraday opportunity.
 
-- **Pip convention:** 50 pips = **5.00** of Gold price movement (1 pip = 0.10).
-- **50 pips is the minimum acceptable opportunity, not the maximum target.**
+- **Pip convention:** 500 pips = **5.00** of Gold price movement (1 pip = 0.01).
+- **500 pips ($5) is the minimum acceptable opportunity, not the maximum target.**
 
 | Move to first objective | Classification |
 |---|---|
-| under 50 pips | Generally not a worthwhile signal |
-| 50–99 pips | Good day-trading opportunity |
-| 100–199 pips | Strong opportunity |
-| 200+ pips | Major potential intraday opportunity |
+| under 500 pips ($5) | Generally not a worthwhile signal |
+| 500–999 pips ($5–$10) | Good day-trading opportunity |
+| 1000–1999 pips ($10–$20) | Strong opportunity |
+| 2000+ pips ($20+) | Major potential intraday opportunity |
 
 Rules stated explicitly:
 
-- **Never cap the target at 50 pips.** If the structure supports a larger move,
+- **Never cap the target at 500 pips.** If the structure supports a larger move,
   identify and display the larger potential.
-- **"50 pips available" must not mean automatic BUY/SELL.** The correct reading is
-  *50+ pips of realistic movement available **and** a strong technical setup =
+- **"500 pips available" must not mean automatic BUY/SELL.** The correct reading is
+  *500+ pips of realistic movement available **and** a strong technical setup =
   signal opportunity*. Direction, entry zone, confirmation, invalidation and
   target still come from the technical analysis.
 - Prioritise opportunities where the **first realistic technical target** is at
-  least 50 pips away.
+  least 500 pips away.
 
 ---
 
@@ -256,6 +259,6 @@ moment was invisible by construction.
 | **Every strategy runs on every cycle.** Twenty-three detectors across four families — smart money, trend, range, price-action — each answering only whether *its* pattern is present |
 | **Two strategies on one trade merge**, they do not duplicate. Agreement is confluence and raises the score by a bounded amount |
 | **Conviction and context are scored separately.** A mean-reversion setup is judged on how good an example of itself it is, not on a trend-weighted score it was never trying to satisfy |
-| **The 50-pip floor is a gate on the first objective**, and the reward/risk of the objective actually banked must clear the profile's minimum. A 1.1R winner against a 1R loser is a losing method whatever the win rate looks like |
+| **The 500-pip ($5) floor is a gate on the first objective**, and the reward/risk of the objective actually banked must clear the profile's minimum. A 1.1R winner against a 1R loser is a losing method whatever the win rate looks like |
 | **A short re-admission window after a setup resolves is deduplication, not a cap.** The identical idea — same strategy, same direction, same area — is not rebuilt on unchanged evidence five seconds later. Any *different* setup, and the same one on improved evidence, is admitted immediately |
 | **The backtester replays the real pipeline** — strategies, book, resolver — so what it measures is the application's own behaviour |

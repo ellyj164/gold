@@ -1,28 +1,30 @@
 """Opportunity sizing for day trading.
 
-The trader's rule: 50 pips is the *minimum* move worth acting on intraday --
-a floor, never a ceiling. If the market structure supports 150 or 300 pips, the
-application must show the larger opportunity rather than truncating it at the
-threshold.
+The trader's rule: 500 pips is the *minimum* move worth acting on intraday --
+a floor, never a ceiling. If the market structure supports 1500 or 3000 pips,
+the application must show the larger opportunity rather than truncating it at
+the threshold.
 
-On XAUUSD one pip is 0.10 of price, so the 50-pip minimum is a 5.00 move.
+On XAUUSD one pip is 0.01 of price, so the 500-pip minimum is a 5.00 move --
+a $5 move in Gold.
 
-The other half of the rule matters just as much: having 50 pips available does
+The other half of the rule matters just as much: having 500 pips available does
 not make a signal. It makes a setup *eligible*. Direction, entry, confirmation
 and invalidation still have to come from the technical analysis.
 """
 
 from __future__ import annotations
 
-# XAUUSD pip convention: 50 pips = 5.00 of price movement.
-PIP_SIZE = 0.10
+# XAUUSD pip convention: 1 pip = 0.01 of price, so 500 pips = 5.00 ($5) of
+# price movement.
+PIP_SIZE = 0.01
 
 # Bands from the specification, largest first so the first match wins.
 OPPORTUNITY_BANDS = (
-    (200.0, "Major", "major intraday opportunity"),
-    (100.0, "Strong", "strong opportunity"),
-    (50.0, "Good", "good day-trading opportunity"),
-    (0.0, "Below minimum", "below the 50-pip day-trading minimum"),
+    (2000.0, "Major", "major intraday opportunity"),
+    (1000.0, "Strong", "strong opportunity"),
+    (500.0, "Good", "good day-trading opportunity"),
+    (0.0, "Below minimum", "below the 500-pip day-trading minimum"),
 )
 
 
@@ -41,10 +43,10 @@ def classify(pips: float) -> tuple[str, str]:
     for threshold, label, description in OPPORTUNITY_BANDS:
         if pips >= threshold:
             return label, description
-    return "Below minimum", "below the 50-pip day-trading minimum"
+    return "Below minimum", "below the 500-pip day-trading minimum"
 
 
-def assess(entry: float, targets: list, minimum_pips: float = 50.0) -> dict:
+def assess(entry: float, targets: list, minimum_pips: float = 500.0) -> dict:
     """Describe the opportunity a set of targets represents.
 
     ``targets`` is a list of objects or dicts carrying a ``price``. The first

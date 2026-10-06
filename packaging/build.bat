@@ -46,7 +46,7 @@ echo.
 echo [2/5] Running the test suites...
 REM Never package a build that cannot pass its own behaviour tests. Each suite
 REM pins behaviour that has been broken by accident before.
-for %%T in (test_engines test_signals test_trader test_resolution test_timeline test_analysis_v12 test_ai_settings) do (
+for %%T in (test_engines test_signals test_trader test_resolution test_timeline test_analysis_v12 test_ai_settings test_costs) do (
     ".venv\Scripts\python.exe" -m tests.%%T >nul
     if errorlevel 1 (
         echo ERROR: tests.%%T failed. Run it directly to see which check broke:
@@ -58,9 +58,27 @@ for %%T in (test_engines test_signals test_trader test_resolution test_timeline 
 
 echo.
 echo [3/5] Building the application bundle (this takes a few minutes)...
-".venv\Scripts\python.exe" -m PyInstaller packaging\GoldAssistant.spec --noconfirm --distpath dist --workpath build
+REM The intermediate build tree goes to %TEMP%, not into the project.
+REM
+REM This project lives under OneDrive, and OneDrive's Files On-Demand turns
+REM synced folders into reparse points. PyInstaller deletes its output tree
+REM before rewriting it, and deleting a dehydrated placeholder fails with
+REM "WinError 5: Access is denied" -- which is what killed a build here, two
+REM hundred directories deep inside the bundled anthropic package. The work
+REM tree is thousands of transient files and has no business being synced to
+REM the cloud at all, so it is built locally.
+REM
+REM `dist` stays put: it holds the artefacts worth keeping. If the same error
+REM appears on `dist\GoldAssistant`, delete that folder by hand and re-run --
+REM OneDrive will have dehydrated the previous build.
+set "WORKDIR=%TEMP%\goldassist-build"
+".venv\Scripts\python.exe" -m PyInstaller packaging\GoldAssistant.spec --noconfirm --distpath dist --workpath "%WORKDIR%"
 if errorlevel 1 (
     echo ERROR: the PyInstaller build failed.
+    echo.
+    echo If this was "WinError 5: Access is denied" under dist\GoldAssistant,
+    echo OneDrive has dehydrated the previous build. Remove it and retry:
+    echo     rd /s /q dist\GoldAssistant
     exit /b 1
 )
 
@@ -98,7 +116,7 @@ if "%ISCC%"=="" (
     exit /b 0
 )
 
-"%ISCC%" packaging\installer.iss
+"%ISCC%" /DAppVersion=%APPVER% packaging\installer.iss
 if errorlevel 1 (
     echo ERROR: the installer build failed.
     exit /b 1

@@ -121,6 +121,18 @@ def strategy(key: str, name: str, family: str, alignment: str = EITHER,
     """Register a detector. The function takes a Context and returns candidates."""
 
     def decorate(fn):
+        # A duplicate key silently replaces the earlier detector, which is the
+        # worst possible failure: the library still loads, the count still
+        # looks plausible, and one strategy has simply stopped existing --
+        # along with every stored outcome attributed to its key. Registration
+        # order decides which one survives, so the bug depends on import order
+        # and would not reproduce reliably. Caught here instead.
+        if key in REGISTRY:
+            raise ValueError(
+                f"Strategy key {key!r} is already registered by "
+                f"{REGISTRY[key].name!r}. Keys are the identity used in stored "
+                f"outcomes and in profile `enabled_strategies`, so they must be "
+                f"unique; pick a different key for {name!r}.")
         REGISTRY[key] = StrategyDef(key=key, name=name, family=family,
                                     alignment=alignment,
                                     min_conviction=min_conviction,
@@ -150,6 +162,12 @@ class Context:
         # broker served no ticks, and detectors must treat that as "no
         # opinion" rather than as the tape disagreeing.
         self.micro = analysis.get("micro") or {}
+        # The intraday context engines. Same contract as ``micro``: always a
+        # dict, ``available`` says whether it was computed, and an unavailable
+        # read means "no opinion" and never "the setup is worse".
+        self.vwap = analysis.get("vwap") or {}
+        self.auction = analysis.get("auction") or {}
+        self.persistence = analysis.get("persistence") or {}
 
     # -- lookups ------------------------------------------------------------
 
@@ -212,6 +230,59 @@ class Context:
 
         return micro.agrees(self.micro, direction)
 
+    # -- the intraday context engines ---------------------------------------
+
+    def anchor(self, name: str = "day") -> dict | None:
+        """One anchored VWAP ("day", "session", "week"), or None."""
+        if not self.vwap.get("available"):
+            return None
+        return (self.vwap.get("anchors") or {}).get(name)
+
+    def auction_level(self, name: str) -> float | None:
+        """A clock-derived reference by name, e.g. "Asia high"."""
+        if not self.auction.get("available"):
+            return None
+        for level in (self.auction.get("levels") or []):
+            if level.get("name", "").lower() == name.lower():
+                return float(level["price"])
+        return None
+
+    def day_shape(self) -> str:
+        """The auction's read on today: trend day, rotation, or undecided."""
+        if not self.auction.get("available"):
+            return "unknown"
+        return str((self.auction.get("day_type") or {}).get("kind", "unknown"))
+
+    def has_room(self) -> bool | None:
+        """Whether today has range left to give, or None when unmeasured.
+
+        A detector projecting a target should ask: on a day that has already
+        covered 140% of its usual range, a fresh 500-pip objective is not an
+        objective. None means unmeasured and must not be read as False.
+        """
+        used = (self.auction or {}).get("range_used")
+        if not used:
+            return None
+        return used.get("verdict") != "extended"
+
+    def persistent(self) -> bool | None:
+        """True in a trending regime, False in a reverting one, None if unclear.
+
+        The statistical read, not the ADX heuristic. Detectors use it to *size*
+        their own conviction, never to refuse to fire: the regime estimate is
+        itself uncertain, and a detector that stays silent whenever the
+        statistics disagree with it would remove exactly the counter-trend
+        setups that pay in a rotation.
+        """
+        if not self.persistence.get("available"):
+            return None
+        regime = self.persistence.get("regime")
+        if regime == "persistent":
+            return True
+        if regime == "mean-reverting":
+            return False
+        return None
+
     def distance_atr(self, level: float) -> float:
         return abs(self.price - float(level)) / self.atr
 
@@ -227,7 +298,7 @@ class Context:
         """No strong opposing level within ``distance`` in front of price.
 
         Used by detectors that project a target rather than reading one off a
-        level: a 50-pip objective through the middle of H4 resistance is not an
+        level: a 500-pip objective through the middle of H4 resistance is not an
         objective, it is wishful thinking.
         """
         wanted = "resistance" if direction == "bullish" else "support"

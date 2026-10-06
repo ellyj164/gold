@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 
 from . import (awareness, character, expectancy, intermarket as intermarket_module,
                macro as macro_module, management, sessions, topdown)
+from ..fundamentals import drivers
 from . import thesis as thesis_module
 from .memory import Memory, score_band
 from ..signals import states
@@ -117,7 +118,9 @@ class TradingDesk:
         trade = self._manage_all(live, suggestion, analysis, profile)
 
         verdict = self._verdict(suggestion, session, day, view, recall, macro,
-                                method, cross, edge, now)
+                                method, cross, edge, now,
+                                fundamentals=analysis.get("fundamentals"),
+                                profile=profile)
 
         self.state = {
             "session": session.to_dict(),
@@ -289,14 +292,18 @@ class TradingDesk:
     # -- the composed answer -------------------------------------------------
 
     def _verdict(self, suggestion, session, day, view, recall, macro,
-                 method, cross=None, edge=None, now=None) -> dict:
+                 method, cross=None, edge=None, now=None,
+                 fundamentals=None, profile=None) -> dict:
         """Fold every input into one conviction and one suggested size.
 
         Conviction is advice about *how much*, never about *whether*. A setup
-        with low conviction is still a setup, still shown, still alerted.
+        with low conviction is still a setup, still shown, still alerted. The
+        one exception is a setup stacked on an open trade on the same move,
+        which is sized at nothing: see the exposure rule below.
         """
         factors: list[dict] = []
         conviction = 1.0
+        skip = None
 
         def apply(name, value, note):
             nonlocal conviction
@@ -317,6 +324,21 @@ class TradingDesk:
                 apply("top-down method", 0.75, method.headline)
             elif method.compliance == topdown.NO_BIAS:
                 apply("top-down method", 0.85, method.headline)
+
+            # Risk already on the same move. Halving a stacked trade still left
+            # it losing (-0.12R backtest, -0.18R live, against +0.2R for a
+            # standalone one), so by default it is skipped: still shown, still
+            # alerted, and the resolver will not fill it while the first trade
+            # is open. A profile with ``skip_stacked`` off keeps the old rule,
+            # where each stacked trade splits one unit of risk.
+            stacked = int((getattr(suggestion, "exposure", None) or {})
+                          .get("same_direction_open") or 0)
+            if stacked and not suggestion.entered:
+                if getattr(profile, "skip_stacked", True):
+                    skip = suggestion.exposure.get("note", "")
+                else:
+                    apply("open exposure", 1.0 / (1 + stacked),
+                          suggestion.exposure.get("note", ""))
 
             if view is not None and not view.agrees_with(suggestion.direction):
                 apply("session view", 0.8,
@@ -345,6 +367,21 @@ class TradingDesk:
                 elif cross.supports == suggestion.direction:
                     apply("metals regime", 1.05, cross.headline)
 
+            # The macro drivers: real yields, the dollar, positioning.
+            #
+            # Bounded far more tightly than anything else here, and
+            # deliberately so. These are daily series informing an intraday
+            # decision, and the failure mode to engineer against is a macro
+            # opinion quietly becoming an all-day directional filter. At full
+            # strength a completely one-sided macro picture moves conviction by
+            # a tenth; on a typical day it is worth two or three per cent. It
+            # can never stop a setup being taken in either direction.
+            multiplier, why = drivers.alignment_of(fundamentals,
+                                                   suggestion.direction)
+            if abs(multiplier - 1.0) > 1e-9:
+                apply("macro drivers", multiplier,
+                      f"{(fundamentals or {}).get('headline', '')} — {why}")
+
             # When, measured rather than assumed.
             #
             # Every trading text asserts which sessions are best; this reads
@@ -361,6 +398,12 @@ class TradingDesk:
 
         conviction = max(0.05, min(1.3, conviction))
         risk_fraction, risk_label = _risk_for(conviction)
+        if skip is not None:
+            # Shown beside the other factors but kept out of the product, so
+            # conviction still reads as what the setup itself is worth.
+            factors.append({"factor": "open exposure", "multiplier": 0.0,
+                            "note": skip})
+            risk_fraction, risk_label = 0.0, "skip — same move already on"
 
         notes = list(method.notes)
         if not session.market_open:
@@ -396,9 +439,9 @@ class TradingDesk:
         outcome = {
             "outcome": suggestion.outcome or "untaken",
             "r_multiple": suggestion.r_multiple,
-            "max_favourable_r": round(suggestion.mfe_pips * 0.10 / risk, 2)
+            "max_favourable_r": round(suggestion.mfe_pips * 0.01 / risk, 2)
             if suggestion.entered else 0.0,
-            "max_adverse_r": round(-suggestion.mae_pips * 0.10 / risk, 2)
+            "max_adverse_r": round(-suggestion.mae_pips * 0.01 / risk, 2)
             if suggestion.entered else 0.0,
             "reason": suggestion.exit_reason or suggestion.status,
         }
@@ -420,15 +463,24 @@ class TradingDesk:
                                   else "loss" if suggestion.status in states.LOSING
                                   else "scratch")
 
+        # When the setup actually closed, from the candle the resolver closed
+        # it on -- not when this row is written. A trade resumed after a
+        # restart is resolved the next morning, and stamping it then put
+        # yesterday's stop-outs into today's loss count and cooldown.
+        closed_at = suggestion.exit_at or datetime.now(timezone.utc).isoformat()
         record = {
             "signal_uid": suggestion.id,
             "created_at": suggestion.created_at,
-            "closed_at": datetime.now(timezone.utc).isoformat(),
+            "closed_at": closed_at,
             "direction": suggestion.direction,
             "setup_type": suggestion.setup_type,
             "session": session.name,
             "regime": (analysis.get("regime") or {}).get("regime"),
-            "score": suggestion.score,
+            # The score it was taken on. The live score keeps moving after the
+            # fill and drifts with the outcome, so a record grouped on it would
+            # teach the memory that high scores win because winners kept them.
+            "score": (suggestion.entry_score if getattr(suggestion, "entry_score", None)
+                      is not None else suggestion.score),
             "quality": suggestion.quality,
             "entry": (suggestion.entry_zone.preferred if suggestion.entry_zone
                       else suggestion.price),
@@ -445,6 +497,7 @@ class TradingDesk:
             "conviction": suggestion.conviction,
             "context_score": suggestion.context_score,
             "confirmations": [c.get("key") for c in suggestion.confirmations],
+            "confirmations_at_fill": getattr(suggestion, "confirmations_at_fill", None),
             "fill_price": suggestion.fill_price,
             "filled_at": suggestion.filled_at,
             "exit_price": suggestion.exit_price,
@@ -470,7 +523,7 @@ class TradingDesk:
                 "direction": suggestion.direction,
                 "low": suggestion.entry_zone.low,
                 "high": suggestion.entry_zone.high,
-                "at": datetime.now(timezone.utc).isoformat(),
+                "at": closed_at,
             }
 
         return record

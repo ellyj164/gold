@@ -19,6 +19,7 @@ Run with:  python -m tests.test_trader
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import sys
 import tempfile
@@ -632,6 +633,144 @@ def test_book_keeps_the_other_side_alive():
           str([s.status for s in book.retired]))
 
 
+def _candidate(direction: str, low: float, high: float, stop: float,
+               conviction: float, key: str = "sweep_reversal"):
+    """A strategy candidate at a named price, for the conflict checks."""
+    from goldassist.strategies.base import Candidate, SMC
+    return Candidate(
+        key=key, name=key.replace("_", " ").title(), family=SMC,
+        direction=direction, trigger_family="reversal",
+        label=f"{direction.title()} test setup", conviction=conviction,
+        zone=(low, high), preferred=(low + high) / 2, stop=stop,
+        stop_basis="test", evidence=["test evidence"])
+
+
+def _book_with(candidates, price: float = 4596.0):
+    """A book whose only candidates are the ones handed in."""
+    prof = profile_module.get(None)
+    book = signals.SuggestionBook()
+    book._candidates = lambda *a, **k: list(candidates)   # noqa: SLF001
+    analysis = make_analysis(price)
+    decision = make_decision(price, 60.0)
+    decision["confluence"] = {
+        "bullish": {"score": 55.0, "evidence": [{"detail": "H1 demand"}]},
+        "bearish": {"score": 50.0, "evidence": [{"detail": "H4 supply"}]},
+    }
+    return book, analysis, decision, prof
+
+
+def test_book_refuses_two_directions_at_one_price():
+    """The 2026-08-27 10:45 failure: one long and one short, 2 pips apart.
+
+    Both were built from the same M5 candle -- it wicked through the highs and
+    through the lows -- and each carried its stop inside the other's entry
+    zone, so filling either one stopped the other. The book must publish one.
+    """
+    print("setup book: opposite directions at the same price")
+    book, analysis, decision, prof = _book_with([
+        _candidate("bearish", 4594.523, 4597.219, 4601.714, 78.7),
+        _candidate("bullish", 4595.120, 4597.816, 4590.625, 74.0),
+    ])
+    result = book.sync(analysis, decision, prof)
+
+    check("only one side of a same-price conflict is tracked",
+          len(book.live) <= 1, f"{[(s.action, s.entry_zone.label()) for s in book.live]}")
+    check("the losing side is never logged as a fired signal",
+          len(result["fired"]) == len(book.live), str(len(result["fired"])))
+    check("and is not recorded as an outcome either",
+          not result["finished"], str([s.status for s in result["finished"]]))
+
+    # Re-deriving the same picture must not admit the other side either.
+    book.sync(analysis, decision, prof)
+    directions = {s.direction for s in book.live}
+    check("the suppressed side does not slip in on the next cycle",
+          len(directions) <= 1, str(directions))
+
+
+def test_book_keeps_a_two_sided_range_plan():
+    """The other half of 10:34, which was never a contradiction.
+
+    A short from 4600 targeting 4583 and a long from 4583 are one plan stated
+    twice, not two conflicting calls: the short's objective *is* the long's
+    entry. Their zones are disjoint and both must survive.
+    """
+    print("setup book: disjoint two-sided plan")
+    book, analysis, decision, prof = _book_with([
+        _candidate("bearish", 4598.984, 4601.680, 4606.175, 78.7),
+        _candidate("bullish", 4580.219, 4586.511, 4575.725, 82.3, "double_extreme"),
+    ], price=4600.281)
+    book.sync(analysis, decision, prof)
+
+    directions = {s.direction for s in book.live}
+    check("both legs of a range are tracked when the zones are apart",
+          directions == {"bullish", "bearish"},
+          f"{[(s.action, s.entry_zone.label()) for s in book.live]}")
+
+
+def test_book_will_not_reverse_on_a_filled_setup():
+    print("setup book: no opposite call against an open trade")
+    book, analysis, decision, prof = _book_with([
+        _candidate("bullish", 4595.120, 4597.816, 4590.625, 74.0),
+    ])
+    book.sync(analysis, decision, prof)
+    if not book.live:
+        check("a setup was admitted to test against", False)
+        return
+    held = book.live[0]
+    held.entered = True
+    held.fill_price = held.entry_zone.preferred
+
+    # Now the opposite side turns up scoring far higher.
+    book._candidates = lambda *a, **k: [                       # noqa: SLF001
+        _candidate("bearish", 4594.523, 4597.219, 4601.714, 99.0, "climax_reversal")]
+    book.sync(analysis, decision, prof)
+
+    check("a filled setup is never displaced by the opposite trade",
+          held in book.live, str([(s.action, s.entered) for s in book.live]))
+    check("and the opposite trade is not published alongside it",
+          all(s.direction == "bullish" for s in book.live),
+          str([s.action for s in book.live]))
+
+
+def test_sweep_reversal_reads_one_candle_once():
+    print("sweep reversal: a candle that wicks both ways")
+    from goldassist import strategies
+    from goldassist.strategies import smc
+
+    analysis = make_analysis(4596.0)
+    analysis["liquidity"]["sweeps"] = [
+        {"direction": "bearish", "timeframe": "M5", "level": 4596.80,
+         "time": 1000, "wick_depth_atr": 0.6, "reclaimed_bars": 0,
+         "confirmed_by_structure": True, "strength": 78.0},
+        {"direction": "bullish", "timeframe": "M5", "level": 4595.54,
+         "time": 1000, "wick_depth_atr": 0.2, "reclaimed_bars": 0,
+         "confirmed_by_structure": True, "strength": 62.0},
+    ]
+    ctx = strategies.Context(analysis, make_decision(4596.0, 60.0),
+                             profile_module.get(None))
+    found = smc.sweep_reversal(ctx)
+    check("one indecisive candle yields one sweep reversal, not two",
+          len(found) <= 1, str([(c.direction, c.zone) for c in found]))
+    if found:
+        check("and it is the stronger raid of the two",
+              found[0].direction == "bearish", found[0].direction)
+
+    # The two edges of a real range are still two setups.
+    analysis["liquidity"]["sweeps"] = [
+        {"direction": "bearish", "timeframe": "M5", "level": 4616.0,
+         "time": 1000, "wick_depth_atr": 0.6, "reclaimed_bars": 0,
+         "confirmed_by_structure": True, "strength": 78.0},
+        {"direction": "bullish", "timeframe": "M5", "level": 4576.0,
+         "time": 900, "wick_depth_atr": 0.6, "reclaimed_bars": 0,
+         "confirmed_by_structure": True, "strength": 78.0},
+    ]
+    ctx = strategies.Context(analysis, make_decision(4596.0, 60.0),
+                             profile_module.get(None))
+    wide = smc.sweep_reversal(ctx)
+    check("raids on both edges of a range are both kept",
+          len(wide) == 2, str([(c.direction, c.zone) for c in wide]))
+
+
 def test_book_attention_order():
     print("setup book: which setup gets the banner")
     prof = profile_module.get(None)
@@ -755,6 +894,270 @@ def test_outcome_recording():
     check("the session is recorded", bool(record["session"]))
     check("the managed trade is released", suggestion.id not in desk.trades)
 
+    # Resolved after a restart: the row is written days after the exit, and
+    # must still be dated by the exit.
+    late = signals.build(analysis, make_decision(4400.0, 76.0), prof)
+    late.entered = True
+    late.fill_price = late.entry_zone.preferred
+    late.filled_at = "2026-09-25T11:50:05+00:00"
+    late.status = signals.STOPPED_OUT
+    late.outcome = "loss"
+    late.exit_at = "2026-09-25T13:19:00+00:00"
+    late.confirmations_at_fill = 3
+    record = desk.on_terminated(late, analysis)
+    check("an outcome is dated when it closed, not when it was written",
+          record["closed_at"] == late.exit_at, str(record["closed_at"]))
+    stored = [o for o in db.setup_outcomes() if o["signal_uid"] == late.id]
+    check("the agreement at the fill is stored",
+          bool(stored) and stored[0]["confirmations_at_fill"] == 3,
+          str(stored[0] if stored else None))
+
+
+def test_old_outcomes_are_redated_from_the_signal_log():
+    print("outcomes written before the fix take their exit time from the signal log")
+    with _temp_db() as db:
+        with db.connect() as conn:
+            conn.execute(
+                "INSERT INTO fired_signals (uid, fired_at, closed_at) VALUES (?, ?, ?)",
+                ("abc123", "2026-09-25T11:09:21+00:00", "2026-09-25T13:19:00+00:00"))
+            conn.execute(
+                "INSERT INTO setup_outcomes (signal_uid, created_at, closed_at, entered) "
+                "VALUES (?, ?, ?, 1)",
+                ("abc123", "2026-09-25T11:09:21+00:00", "2026-09-28T09:29:08+00:00"))
+            conn.execute(
+                "INSERT INTO setup_outcomes (signal_uid, created_at, closed_at, entered) "
+                "VALUES (?, ?, ?, 0)",
+                ("never-filled", "2026-09-25T11:00:00+00:00", "2026-09-25T16:00:00+00:00"))
+        Database(db.path).close()               # reopening runs the migration
+        rows = {o["signal_uid"]: o for o in db.setup_outcomes()}
+        check("a filled trade is redated to its exit",
+              rows["abc123"]["closed_at"] == "2026-09-25T13:19:00+00:00",
+              str(rows["abc123"]["closed_at"]))
+        check("an untaken idea is left alone",
+              rows["never-filled"]["closed_at"] == "2026-09-25T16:00:00+00:00")
+
+
+def test_a_stacked_setup_is_sized_at_nothing():
+    print("the desk says skip for a setup stacked on an open trade")
+    import dataclasses
+    from goldassist.trader import TradingDesk
+
+    desk = TradingDesk(temp_db(), None)
+    prof = profile_module.get(None)
+    book = signals.SuggestionBook()
+    analysis = make_analysis(4400.0)
+    decision = make_decision(4400.0, 78.0)
+    book.sync(analysis, decision, prof)
+    frames = {"M15": candles([4400 + i * 0.6 for i in range(60)])}
+    primary = book.primary
+    if primary is None:
+        check("fixture produces a setup", False)
+        return
+    primary.exposure = {"same_direction_open": 1, "with": ["x"],
+                        "note": "1 filled bullish trade already on nearby"}
+    verdict = desk.assess(analysis, decision, book, frames, prof)["verdict"]
+    check("the suggested size is zero", verdict["risk_fraction"] == 0.0,
+          str(verdict["risk_fraction"]))
+    check("and says skip", verdict["risk_label"].startswith("skip"), verdict["risk_label"])
+    check("the reason is listed among the factors",
+          any(f["factor"] == "open exposure" for f in verdict["factors"]))
+    check("conviction itself is untouched", verdict["conviction"] > 0.05,
+          str(verdict["conviction"]))
+
+    old = dataclasses.replace(prof, skip_stacked=False)
+    verdict = desk.assess(analysis, decision, book, frames, old)["verdict"]
+    check("with skip_stacked off it is halved instead",
+          verdict["risk_fraction"] > 0 and any(
+              f["factor"] == "open exposure" and f["multiplier"] == 0.5
+              for f in verdict["factors"]), str(verdict["factors"]))
+
+
+# --- surviving a restart ----------------------------------------------------
+
+@contextlib.contextmanager
+def _temp_db():
+    """A throwaway database, closed before its directory is removed.
+
+    Windows will not delete a file SQLite still has open, so a test that lets
+    the connection outlive the temporary directory fails in the cleanup rather
+    than in a check -- which reads as a crash, not as a failing assertion.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "t.db")
+        try:
+            yield db
+        finally:
+            db.close()
+
+
+def test_suggestion_survives_a_round_trip():
+    print("persistence: a setup written down and read back")
+    prof = profile_module.get(None)
+    built = signals.build(make_analysis(4400.0), make_decision(4400.0, 76.0), prof)
+    signals.resolve.initialise(built)
+    built.armed, built.entered = True, True
+    built.fill_price, built.risk = 4386.0, 11.0
+    built.resolved_through = 1_700_000_000
+    built.targets_hit, built.mfe_pips = 1, 42.0
+    built.history = [{"at": "2026-08-27T09:00:00+00:00", "note": "filled"}]
+
+    back = signals.engine.Suggestion.restore(built.persist())
+
+    def norm(o):
+        if isinstance(o, dict):
+            return {k: norm(v) for k, v in o.items()}
+        if isinstance(o, list):
+            return [norm(v) for v in o]
+        if isinstance(o, bool):
+            return o
+        return float(o) if isinstance(o, (int, float)) else o
+
+    check("a restored setup is identical to the one saved",
+          norm(built.persist()) == norm(back.persist()))
+    check("its stop survives", back.stop == built.stop, str(back.stop))
+    check("the resolver's place in the candles survives",
+          back.resolved_through == built.resolved_through, str(back.resolved_through))
+    check("the fill survives", back.entered and back.fill_price == 4386.0)
+    check("to_dict stays the view model, without the working fields",
+          "resolved_through" not in built.to_dict())
+
+
+def test_book_resumes_after_a_restart():
+    print("setup book: resuming what was live when the app closed")
+    prof = profile_module.get(None)
+    first = signals.SuggestionBook()
+    analysis, decision = make_analysis(4400.0), make_decision(4400.0, 76.0)
+    decision["confluence"] = {
+        "bullish": {"score": 76.0, "evidence": [{"detail": "H1 demand"}]},
+        "bearish": {"score": 20.0, "evidence": []},
+    }
+    first.sync(analysis, decision, prof)
+    if not first.live:
+        check("a setup existed to resume", False)
+        return
+    saved = [s.persist() for s in first.live]
+    ids = {s.id for s in first.live}
+
+    # A brand new run, as after a restart.
+    second = signals.SuggestionBook()
+    restored = second.restore(saved, prof)
+    check("the setups that were live come back",
+          {s.id for s in restored} == ids, str(len(restored)))
+    check("and they are on the board, not merely returned",
+          {s.id for s in second.live} == ids)
+
+    # Resuming twice must not double the board.
+    second.restore(saved, prof)
+    check("resuming again does not duplicate them",
+          len(second.live) == len(ids), str(len(second.live)))
+
+
+def test_book_does_not_resume_stale_or_finished_setups():
+    print("setup book: what must not come back")
+    prof = profile_module.get(None)
+    built = signals.build(make_analysis(4400.0), make_decision(4400.0, 76.0), prof)
+    signals.resolve.initialise(built)
+
+    stale = built.persist()
+    old = datetime.now(timezone.utc) - timedelta(minutes=60 * 48)
+    stale["created_at"] = old.isoformat()
+    check("a setup older than the expiry window is not revived",
+          not signals.SuggestionBook().restore([stale], prof))
+
+    finished = built.persist()
+    finished["status"] = "STOPPED OUT"
+    finished["outcome"] = "loss"
+    check("a setup that already resolved is not revived",
+          not signals.SuggestionBook().restore([finished], prof))
+
+    check("an unreadable card is skipped, not fatal",
+          signals.SuggestionBook().restore([{"id": "x"}, {}], prof) == [])
+
+
+def test_stranded_signals_are_reconciled():
+    print("signal log: rows left open by a restart")
+    with _temp_db() as db:
+        prof = profile_module.get(None)
+        book = signals.SuggestionBook()
+        analysis, decision = make_analysis(4400.0), make_decision(4400.0, 76.0)
+        decision["confluence"] = {
+            "bullish": {"score": 76.0, "evidence": [{"detail": "H1 demand"}]},
+            "bearish": {"score": 20.0, "evidence": []},
+        }
+        result = book.sync(analysis, decision, prof)
+        for s in result["fired"]:
+            db.record_fired_signal(s.to_dict(), s.persist())
+        fired = len(result["fired"])
+        check("the setups were logged", fired >= 1, str(fired))
+
+        cards = db.open_fired_signals()
+        check("their cards are readable back", len(cards) == fired, str(len(cards)))
+
+        resumed = signals.SuggestionBook().restore(cards, prof)
+        kept = {s.id for s in resumed}
+        check("and they restore", len(kept) == fired, str(len(kept)))
+
+        # Nothing is stranded while the book is holding all of them.
+        check("a resumed setup is left alone",
+              db.close_stranded_signals(keep=kept) == 0)
+
+        # One of them had actually filled before the shutdown. That difference
+        # decides how it may honestly be closed.
+        traded = result["fired"][0]
+        traded.entered = True
+        traded.fill_price = traded.entry_zone.preferred
+        traded.filled_at = "2026-08-27T09:10:00+00:00"
+        traded.result_pips = -12.0
+        db.update_fired_signal(traded.to_dict(), traded.persist())
+
+        # With nothing holding them, they are closed honestly.
+        closed = db.close_stranded_signals(keep=set())
+        check("every abandoned setup is reconciled", closed == fired, str(closed))
+        rows = {r["uid"]: r for r in db.fired_signals()}
+
+        filled = rows[traded.id]
+        check("a trade that filled is never called untaken",
+              filled["outcome"] == "unresolved", str(filled["outcome"]))
+        check("nor is it invented as a win or a loss",
+              filled["outcome"] not in ("win", "loss"), str(filled["outcome"]))
+        check("what was measured before the shutdown is kept",
+              filled["result_pips"] == -12.0, str(filled["result_pips"]))
+
+        never = [r for uid, r in rows.items() if uid != traded.id]
+        check("a setup that never filled is untaken",
+              all(r["outcome"] == "untaken" for r in never),
+              str({r["outcome"] for r in never}))
+        check("with expiry named as the reason",
+              all(r["exit_reason"] == "expiry" for r in never))
+        check("and nothing is left open",
+              db.open_fired_signals() == [])
+        check("the learning record is untouched by the reconciliation",
+              db.setup_outcomes() == [], str(len(db.setup_outcomes())))
+
+
+def test_signal_row_carries_the_setup_direction():
+    print("signal log: a setup's direction is its own")
+    with _temp_db() as db:
+        prof = profile_module.get(None)
+        analysis = make_analysis(4400.0)
+        decision = make_decision(4400.0, 76.0, "bullish")
+
+        # The engine leans bullish; the setup on the board is a bearish one.
+        card = signals.build(analysis, decision, prof).to_dict()
+        card["direction"] = "bearish"
+        card["setup_label"] = "Bearish Sweep Reversal"
+        db.record_signal(decision, analysis, None, suggestion=card)
+
+        row = db.recent_signals(1)[0]
+        check("the decision's direction is recorded as the decision's",
+              row["direction"] == "bullish", str(row["direction"]))
+        check("the setup's direction is recorded as the setup's",
+              row["setup_direction"] == "bearish", str(row["setup_direction"]))
+        label = (row["setup_label"] or "").lower()
+        check("so the label is no longer orphaned from its direction",
+              row["setup_direction"] in label,
+              row["setup_direction"] + " / " + label)
+
 
 # --- runner ----------------------------------------------------------------
 
@@ -769,8 +1172,19 @@ def main() -> int:
                  test_book_tracks_many_setups, test_book_has_no_daily_cap,
                  test_book_tracks_both_directions, test_book_keeps_the_other_side_alive,
                  test_book_attention_order,
+                 test_book_refuses_two_directions_at_one_price,
+                 test_book_keeps_a_two_sided_range_plan,
+                 test_book_will_not_reverse_on_a_filled_setup,
+                 test_sweep_reversal_reads_one_candle_once,
+                 test_suggestion_survives_a_round_trip,
+                 test_book_resumes_after_a_restart,
+                 test_book_does_not_resume_stale_or_finished_setups,
+                 test_stranded_signals_are_reconciled,
+                 test_signal_row_carries_the_setup_direction,
                  test_macro_interpretation, test_desk_never_blocks,
-                 test_outcome_recording):
+                 test_outcome_recording,
+                 test_old_outcomes_are_redated_from_the_signal_log,
+                 test_a_stacked_setup_is_sized_at_nothing):
         test()
 
     print()

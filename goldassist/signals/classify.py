@@ -42,6 +42,13 @@ class Trigger:
         d["outstanding"] = self.outstanding or []
         return d
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "Trigger":
+        return cls(description=data.get("description", ""),
+                   requirements=list(data.get("requirements") or []),
+                   met=bool(data.get("met")), met_by=data.get("met_by"),
+                   outstanding=list(data.get("outstanding") or []))
+
 
 def setup_type(analysis: dict, direction: str) -> str:
     """Classify what kind of opportunity this is."""

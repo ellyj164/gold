@@ -163,6 +163,37 @@ def run_binary(exe: Path, label: str) -> None:
               bool((clock.get("now") or {}).get("session_label")),
               str(clock.get("now"))[:200])
 
+        # The timezone database, which the bundle has to carry.
+        #
+        # Session windows are anchored to Tokyo, London and New York wall-clock
+        # time and converted through `zoneinfo` at runtime, so a frozen build
+        # without `tzdata` would fail to name a single session -- and would do
+        # it only in the packaged app, which is exactly the class of failure
+        # this suite exists to catch. `/api/clock` is the cheapest endpoint
+        # that forces the conversion.
+        session_label = (clock.get("now") or {}).get("session_label") or ""
+        check(f"{label}: the timezone database is bundled",
+              session_label and session_label.lower() != "unknown",
+              f"session_label={session_label!r} — if this is empty, tzdata is "
+              f"missing from the bundle")
+
+        status, body = get(f"{base}/api/health")
+        health = json.loads(body)
+        check(f"{label}: the health check is served",
+              status == 200 and "checks" in health and "summary" in health,
+              str(health)[:200])
+        check(f"{label}: it reports on the MetaTrader connection",
+              any(c.get("check") == "MetaTrader connection"
+                  for c in health.get("checks", [])),
+              str(health.get("checks"))[:200])
+        # Costs are the figures every R depends on; a packaged build that
+        # cannot measure them would silently report gross numbers as net.
+        cost_check = next((c for c in health.get("checks", [])
+                           if c.get("check") == "Transaction costs"), None)
+        check(f"{label}: transaction costs are measured in the packaged build",
+              cost_check is not None and cost_check.get("ok"),
+              str(cost_check))
+
         status, body = get(f"{base}/api/fired")
         fired = json.loads(body)
         check(f"{label}: the signal log is served",

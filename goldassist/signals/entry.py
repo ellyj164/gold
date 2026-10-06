@@ -35,6 +35,14 @@ class ZoneSource:
         d["quality"] = round(self.quality, 1)
         return d
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "ZoneSource":
+        return cls(kind=data.get("kind", ""), timeframe=data.get("timeframe", ""),
+                   low=float(data.get("low") or 0.0),
+                   high=float(data.get("high") or 0.0),
+                   quality=float(data.get("quality") or 0.0),
+                   label=data.get("label", ""))
+
 
 @dataclass
 class EntryZone:
@@ -63,6 +71,19 @@ class EntryZone:
             "sources": [s.to_dict() for s in self.sources],
             "label": self.label(),
         }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "EntryZone":
+        """Rebuild a zone from its stored form. ``label`` is derived, not read."""
+        return cls(
+            low=float(data["low"]), high=float(data["high"]),
+            preferred=float(data["preferred"]),
+            confluence_count=int(data.get("confluence_count") or 0),
+            sources=[ZoneSource.from_dict(x) for x in (data.get("sources") or [])],
+            distance_atr=float(data.get("distance_atr") or 0.0),
+            price_inside=bool(data.get("price_inside")),
+            visited=bool(data.get("visited")),
+        )
 
     def label(self) -> str:
         return f"{self.low:.2f}-{self.high:.2f}"

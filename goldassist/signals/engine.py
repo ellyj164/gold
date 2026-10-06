@@ -82,6 +82,15 @@ class Target:
             "below_minimum": self.below_minimum,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "Target":
+        return cls(level=data.get("level", ""), price=float(data["price"]),
+                   basis=data.get("basis", ""),
+                   pips=float(data.get("pips") or 0.0),
+                   reward_risk=data.get("reward_risk"),
+                   hit=bool(data.get("hit")),
+                   below_minimum=bool(data.get("below_minimum")))
+
 
 @dataclass
 class Suggestion:
@@ -138,6 +147,38 @@ class Suggestion:
     regime_at_entry: str = ""
     # Other strategies that independently pointed at the same trade.
     confirmations: list[dict] = field(default_factory=list)
+    # The confluence evidence behind the setup, as numbers: each pillar's share
+    # of its maximum and each penalty's points, for this setup's direction.
+    # Captured when the setup is built and again at the moment it arms, which
+    # is the moment the trade was actually justified. This is the feature
+    # vector the weight fit reads -- without it the backtest can report what a
+    # setup was worth but never which evidence made it worth that.
+    features: dict = field(default_factory=dict)
+    # Other live setups already committed in the same direction. Two longs a
+    # few dollars apart filling within minutes are one bet on one move, and a
+    # trader sizing each at full risk is carrying double without knowing it.
+    exposure: dict = field(default_factory=dict)
+    # How many same-direction trades were already filled nearby when this one
+    # filled. Frozen at the fill, unlike ``exposure``, so the backtest can ask
+    # whether stacked trades earn what standalone ones do.
+    exposure_at_fill: int | None = None
+    # The score at the moment the setup armed -- the number the trade was
+    # actually taken on. ``score`` keeps being re-measured after the fill, and
+    # it drifts with the outcome: losing trades lose evidence as they go wrong.
+    # Every record that groups trades by score must read this, or the grouping
+    # measures what happened after entry and calls it predictive. Backtests #1
+    # to #5 grouped on the final score and their score-band tables were
+    # largely that artefact.
+    entry_score: float | None = None
+    # How many other strategies agreed at the moment of the fill. Frozen for
+    # the same reason as ``entry_score``: ``confirmations`` keeps growing while
+    # a trade is open, and winners stay open longer.
+    confirmations_at_fill: int | None = None
+    # Handed over by the setup book every cycle and never saved: the other
+    # setups on the board, and the ATR that defines "the same move", so the
+    # resolver can refuse a fill that would stack on an open trade.
+    peers: list = field(default_factory=list, repr=False, compare=False)
+    peer_atr: float = field(default=0.0, repr=False, compare=False)
 
     # -- execution state ----------------------------------------------------
     # A setup is armed once it has actually confirmed: price in the zone and
@@ -165,6 +206,20 @@ class Suggestion:
     exit_note: str = ""
     result_pips: float = 0.0
     r_multiple: float = 0.0
+
+    # -- what the broker took -----------------------------------------------
+    #
+    # Gross and net are kept side by side deliberately. ``result_pips`` and
+    # ``r_multiple`` keep their original meaning so stored history stays
+    # comparable across the change; the net figures are what the statistics,
+    # the expectancy layer and the reward/risk gate read, because they are what
+    # a trader is actually paid. ``costs`` is the model that produced them --
+    # None means costs were not modelled for this setup, which is reported
+    # rather than silently treated as zero.
+    costs: object | None = None
+    cost_pips: float = 0.0
+    net_result_pips: float = 0.0
+    net_r_multiple: float = 0.0
 
     history: list[dict] = field(default_factory=list)
 
@@ -216,6 +271,7 @@ class Suggestion:
             "context_score": round(self.context_score, 1),
             "regime_at_entry": self.regime_at_entry,
             "confirmations": self.confirmations,
+            "exposure": self.exposure,
             "armed": self.armed,
             "entered": self.entered,
             "fill_price": self.fill_price,
@@ -233,14 +289,110 @@ class Suggestion:
             "exit_note": self.exit_note,
             "result_pips": round(self.result_pips, 1),
             "r_multiple": round(self.r_multiple, 2),
+            "cost_pips": round(self.cost_pips, 1),
+            "net_result_pips": round(self.net_result_pips, 1),
+            "net_r_multiple": round(self.net_r_multiple, 2),
+            "costs": self.costs.to_dict() if self.costs is not None else None,
             "history": self.history[-25:],
             "is_terminal": self.is_terminal,
             "won": self.status in WINNING,
         }
 
+    # -- persistence --------------------------------------------------------
+    #
+    # Kept apart from ``to_dict``, which is the *view* model the API and the
+    # interface read. A view may round, truncate and derive freely; a saved
+    # setup may not, because it has to come back as the same object. The two
+    # were one method for exactly as long as it took to notice that reloading
+    # a setup from its card silently dropped the resolver's place in the
+    # candles and rewound the trade.
+
+    # Working state ``to_dict`` has no reason to publish, and a restored setup
+    # cannot do without.
+    PERSIST_EXTRA = ("resolved_through", "risk", "armed_at", "trigger_family",
+                     "features", "exposure_at_fill", "entry_score",
+                     "confirmations_at_fill")
+
+    def persist(self) -> dict:
+        """The setup as it must be written down to be resumed later."""
+        data = self.to_dict()
+        for name in self.PERSIST_EXTRA:
+            data[name] = getattr(self, name)
+        data["history"] = self.history
+        return data
+
+    @classmethod
+    def restore(cls, data: dict) -> "Suggestion":
+        """Rebuild a setup saved by :meth:`persist`.
+
+        Raises on a card that cannot be rebuilt faithfully -- a half-restored
+        setup that resolves against the wrong stop is worse than one that is
+        honestly dropped, so the caller is told rather than handed a shape.
+        """
+        zone = data.get("entry_zone")
+        suggestion = cls(
+            id=data["id"],
+            direction=data["direction"],
+            action=data["action"],
+            setup_type=data.get("setup_type", ""),
+            setup_label=data.get("setup_label", ""),
+            status=data["status"],
+            score=float(data.get("score") or 0.0),
+            quality=data.get("quality", ""),
+            price=float(data.get("price") or 0.0),
+            entry_zone=entry_module.EntryZone.from_dict(zone) if zone else None,
+            trigger=Trigger.from_dict(data.get("trigger") or {}),
+            invalidation=data.get("invalidation") or {},
+            targets=[Target.from_dict(t) for t in (data.get("targets") or [])],
+            reward_risk=data.get("reward_risk"),
+            reasons=list(data.get("reasons") or []),
+            risks=list(data.get("risks") or []),
+            opportunity=data.get("opportunity") or {},
+            created_at=data.get("created_at", ""),
+            updated_at=data.get("updated_at", ""),
+            peak_score=float(data.get("peak_score") or 0.0),
+        )
+        for name in ("fired_at", "fired_date", "fired_clock", "fired_session",
+                     "fired_session_label", "clock_offset", "strategy",
+                     "strategy_name", "family", "trigger_family", "alignment",
+                     "regime_at_entry", "exit_reason", "exit_note", "outcome",
+                     "exit_at", "armed_at", "filled_at"):
+            if data.get(name) is not None:
+                setattr(suggestion, name, data[name])
+        suggestion.fired_session_quality = float(data.get("fired_session_quality") or 0.0)
+        suggestion.conviction = float(data.get("conviction") or 0.0)
+        suggestion.context_score = float(data.get("context_score") or 0.0)
+        suggestion.confirmations = list(data.get("confirmations") or [])
+        suggestion.features = dict(data.get("features") or {})
+        suggestion.exposure = dict(data.get("exposure") or {})
+        suggestion.exposure_at_fill = data.get("exposure_at_fill")
+        suggestion.entry_score = data.get("entry_score")
+        suggestion.confirmations_at_fill = data.get("confirmations_at_fill")
+        suggestion.history = list(data.get("history") or [])
+        suggestion.armed = bool(data.get("armed"))
+        suggestion.entered = bool(data.get("entered"))
+        suggestion.fill_price = data.get("fill_price")
+        suggestion.stop = data.get("stop")
+        suggestion.initial_stop = data.get("initial_stop")
+        suggestion.risk = data.get("risk")
+        suggestion.targets_hit = int(data.get("targets_hit") or 0)
+        suggestion.mfe_pips = float(data.get("mfe_pips") or 0.0)
+        suggestion.mae_pips = float(data.get("mae_pips") or 0.0)
+        suggestion.resolved_through = data.get("resolved_through")
+        suggestion.exit_price = data.get("exit_price")
+        suggestion.result_pips = float(data.get("result_pips") or 0.0)
+        suggestion.r_multiple = float(data.get("r_multiple") or 0.0)
+        # The cost *model* is deliberately not restored: the card carries its
+        # reading, not the object, and the book re-attaches the current one on
+        # the next cycle. What is restored is what had already been measured.
+        suggestion.cost_pips = float(data.get("cost_pips") or 0.0)
+        suggestion.net_result_pips = float(data.get("net_result_pips") or 0.0)
+        suggestion.net_r_multiple = float(data.get("net_r_multiple") or 0.0)
+        return suggestion
+
 
 def build(analysis: dict, decision: dict, profile, candidate=None,
-          now: datetime | None = None) -> Suggestion | None:
+          now: datetime | None = None, costs=None) -> Suggestion | None:
     """Create a suggestion from a strategy candidate, or from the decision.
 
     Returns None when there is not even a candidate worth tracking -- the
@@ -248,6 +400,10 @@ def build(analysis: dict, decision: dict, profile, candidate=None,
     whose first realistic objective cannot clear the profile's pip minimum is
     rejected here: the trader's rule is that a move too small to be worth
     taking is not a signal, however good the pattern looks.
+
+    ``costs`` is a :class:`goldassist.costs.CostModel`, or None to leave costs
+    unmodelled. When supplied it tightens the reward/risk gate below, because a
+    gross ratio is not the ratio the trade actually pays.
     """
     direction = candidate.direction if candidate is not None else decision["direction"]
     price = float(analysis["price"])
@@ -271,7 +427,7 @@ def build(analysis: dict, decision: dict, profile, candidate=None,
         return None
     reference = zone.preferred if zone is not None else price
 
-    minimum_pips = getattr(profile, "min_target_pips", 50.0)
+    minimum_pips = getattr(profile, "min_target_pips", 500.0)
     raw_targets = risk_levels.targets_for_zone(
         analysis, direction, reference, invalidation["price"],
         minimum_pips=minimum_pips,
@@ -296,11 +452,23 @@ def build(analysis: dict, decision: dict, profile, candidate=None,
     # closed at has to pay for the risk it demands: banking 1.1R on the winners
     # while losing 1R on the losers is a losing method whatever the win rate
     # looks like. Which objective that is depends on where the profile banks.
+    # The gate is applied to the *net* ratio when costs are known. A gross 1.5
+    # on a 250-pip stop is a net 1.34 once a 25-pip round turn is charged, and
+    # a gate that reads the gross figure passes trades the method is meant to
+    # refuse. With no cost model the two are identical, so nothing changes.
     minimum_rr = float(getattr(profile, "min_reward_risk", 1.5) or 0)
     if minimum_rr:
         banked = targets[min(len(targets), max(1, int(getattr(
             profile, "close_at_target", 1)))) - 1]
-        if not banked.reward_risk or banked.reward_risk < minimum_rr:
+        if not banked.reward_risk:
+            return None
+        effective_rr = banked.reward_risk
+        if costs is not None and costs.available:
+            net = costs.net_reward_risk(
+                abs(banked.price - reference), abs(reference - invalidation["price"]))
+            if net is not None:
+                effective_rr = net
+        if effective_rr < minimum_rr:
             return None
 
     stamp = (now or datetime.now(timezone.utc)).isoformat()
@@ -335,6 +503,8 @@ def build(analysis: dict, decision: dict, profile, candidate=None,
         conviction=conviction,
         context_score=context,
         regime_at_entry=(analysis.get("regime") or {}).get("regime", ""),
+        costs=costs,
+        features=features_for(decision, direction, conviction),
     )
     _stamp_clock(suggestion, stamp)
     resolve.initialise(suggestion)
@@ -401,7 +571,7 @@ def update(suggestion: Suggestion, analysis: dict, decision: dict, profile,
                  else suggestion.entry_zone.preferred if suggestion.entry_zone
                  else suggestion.price)
     suggestion.opportunity = opportunity.assess(
-        reference, suggestion.targets, getattr(profile, "min_target_pips", 50.0))
+        reference, suggestion.targets, getattr(profile, "min_target_pips", 500.0))
     if suggestion.entry_zone:
         zone = suggestion.entry_zone
         atr = analysis.get("atr") or 1
@@ -423,6 +593,9 @@ def update(suggestion: Suggestion, analysis: dict, decision: dict, profile,
         if _status_for(suggestion, analysis, decision, profile) == CONFIRMED:
             suggestion.armed = True
             suggestion.armed_at = stamp
+            suggestion.features = features_for(decision, suggestion.direction,
+                                               suggestion.conviction)
+            suggestion.entry_score = round(float(suggestion.score), 1)
             events.append("Confirmed — the entry is live: "
                           + suggestion.trigger.description)
 
@@ -542,6 +715,33 @@ def _headroom_gain(current: float, candidate_conviction: float) -> float:
     headroom = max(0.0, 100.0 - current)
     quality = max(0.0, min(1.0, candidate_conviction / 100.0))
     return headroom * CONFIRMATION_SHARE * quality
+
+
+def features_for(decision: dict, direction: str, conviction: float = 0.0) -> dict:
+    """The confluence evidence for ``direction`` as a flat numeric record.
+
+    Pillars are recorded as the share of their own maximum they earned (0..1)
+    so a profile's weight overrides do not change what the feature means;
+    penalties as the points they deducted. Every catalogue pillar is present,
+    zero when it earned nothing, because an absent pillar is information and a
+    missing key is not.
+    """
+    from ..decision.confluence import CATALOGUE
+
+    side = (decision.get("confluence") or {}).get(direction) or {}
+    record = {f"pillar:{name}": 0.0 for name in CATALOGUE}
+    for item in side.get("evidence") or []:
+        cap = float(item.get("max_points") or 0.0)
+        if cap > 0:
+            key = f"pillar:{item.get('factor')}"
+            record[key] = round(min(1.0, record.get(key, 0.0)
+                                    + float(item.get("points") or 0.0) / cap), 4)
+    for item in side.get("penalties") or []:
+        key = f"penalty:{item.get('factor')}"
+        record[key] = round(record.get(key, 0.0) + float(item.get("points") or 0.0), 2)
+    record["context_score"] = round(float(side.get("score") or 0.0), 1)
+    record["conviction"] = round(float(conviction or 0.0), 1)
+    return record
 
 
 def _context_score(decision: dict, direction: str) -> float:

@@ -280,7 +280,7 @@ def test_lifecycle():
     check("reaching the first objective resolves the setup",
           suggestion.status == signals.TARGET_HIT, suggestion.status)
     check("the win is banked in pips and R",
-          suggestion.outcome == "win" and suggestion.result_pips >= 50,
+          suggestion.outcome == "win" and suggestion.result_pips >= 500,
           f"{suggestion.outcome} {suggestion.result_pips}")
     check("a resolved setup is terminal", suggestion.status in signals.TERMINAL_STATES)
 
@@ -324,36 +324,37 @@ def test_serialisation():
 
 
 def test_pip_opportunity():
-    print("50-pip opportunity rule")
+    print("500-pip opportunity rule")
     from goldassist.signals import opportunity as op
 
-    check("50 pips is 5.00 of Gold price", op.to_price(50) == 5.0, str(op.to_price(50)))
-    check("5.00 of price is 50 pips", op.to_pips(5.0) == 50.0, str(op.to_pips(5.0)))
+    check("500 pips is 5.00 of Gold price", op.to_price(500) == 5.0, str(op.to_price(500)))
+    check("5.00 of price is 500 pips", round(op.to_pips(5.0), 6) == 500.0,
+          str(op.to_pips(5.0)))
 
-    for pips, expected in ((49, "Below minimum"), (50, "Good"), (99, "Good"),
-                           (100, "Strong"), (199, "Strong"), (200, "Major")):
+    for pips, expected in ((490, "Below minimum"), (500, "Good"), (990, "Good"),
+                           (1000, "Strong"), (1990, "Strong"), (2000, "Major")):
         check(f"{pips} pips grades as {expected}",
               op.classify(pips)[0] == expected, op.classify(pips)[0])
 
     # The worked example from the specification.
-    spec = op.assess(4400.0, [{"price": 4405.0}, {"price": 4415.0}, {"price": 4430.0}], 50.0)
+    spec = op.assess(4400.0, [{"price": 4405.0}, {"price": 4415.0}, {"price": 4430.0}], 500.0)
     check("spec example qualifies", spec["qualifies"])
-    check("spec example reports the first objective at 50 pips",
-          spec["first_target_pips"] == 50.0, str(spec["first_target_pips"]))
-    check("spec example is never capped at 50 pips",
-          spec["max_pips"] == 300.0, str(spec["max_pips"]))
+    check("spec example reports the first objective at 500 pips",
+          spec["first_target_pips"] == 500.0, str(spec["first_target_pips"]))
+    check("spec example is never capped at 500 pips",
+          spec["max_pips"] == 3000.0, str(spec["max_pips"]))
     check("spec example grades on the full potential",
           spec["classification"] == "Major", spec["classification"])
 
-    short = op.assess(4400.0, [{"price": 4402.0}], 50.0)
-    check("a 20-pip move does not qualify", not short["qualifies"])
-    check("the shortfall is reported", short["shortfall_pips"] == 30.0,
+    short = op.assess(4400.0, [{"price": 4402.0}], 500.0)
+    check("a 200-pip ($2) move does not qualify", not short["qualifies"])
+    check("the shortfall is reported", short["shortfall_pips"] == 300.0,
           str(short["shortfall_pips"]))
 
     # Availability alone must not create a signal.
     prof = profile_module.get("Default XAUUSD")
     check("profile carries a configurable pip minimum",
-          getattr(prof, "min_target_pips", None) == 50.0)
+          getattr(prof, "min_target_pips", None) == 500.0)
 
 
 def test_targets_respect_pip_floor():
@@ -364,11 +365,11 @@ def test_targets_respect_pip_floor():
     zone = signals.entry.build(analysis, "bullish")
     inval = risk_levels.invalidation_for_zone(analysis, "bullish", zone.low, zone.high)
     targets = risk_levels.targets_for_zone(analysis, "bullish", zone.preferred,
-                                           inval["price"], minimum_pips=50.0)
+                                           inval["price"], minimum_pips=500.0)
     check("targets are returned", len(targets) > 0)
     if targets:
         first = op.to_pips(targets[0]["price"] - zone.preferred)
-        check("the first objective clears 50 pips", first >= 50.0, f"{first:.1f} pips")
+        check("the first objective clears 500 pips", first >= 500.0, f"{first:.1f} pips")
         check("each target reports its pip distance",
               all("pips" in t for t in targets))
         check("larger targets are not truncated at the minimum",
@@ -382,6 +383,8 @@ def test_targets_respect_pip_floor():
           all(t.to_dict()["pips"] >= 0 for t in suggestion.targets))
 
 def main() -> int:
+    from tests.clock import outside_rollover
+    outside_rollover()
     for test in (test_pip_opportunity, test_targets_respect_pip_floor, test_entry_zone, test_invalidation_side, test_quality_bands,
                  test_setup_classification, test_trigger_strictness,
                  test_lifecycle, test_weakening, test_serialisation):

@@ -56,6 +56,10 @@ class MarketFeed:
         self._lock = threading.RLock()
         self.last_error: str | None = None
         self.last_update: datetime | None = None
+        # True when the most recent refresh failed on *every* timeframe, which
+        # means the terminal connection is gone rather than one series being
+        # briefly unavailable. The service reconnects on this.
+        self.all_failed = False
 
     # -- loading ------------------------------------------------------------
 
@@ -82,14 +86,24 @@ class MarketFeed:
 
         Returns a map of timeframe -> whether a new candle closed since the
         previous refresh.
+
+        A failure here is recorded rather than raised, because one bad
+        timeframe must not kill the analysis loop -- but it is recorded
+        *properly*. The previous version assigned ``last_error`` inside the
+        loop and then unconditionally cleared it at the end, so a cycle in
+        which every single timeframe failed finished by reporting no error at
+        all. That is exactly what happened on 2026-09-05: seven consecutive
+        "IPC send failed" warnings per cycle, and an interface that went on
+        saying the feed was healthy while the chart quietly froze.
         """
         closed: dict[str, bool] = {}
+        failures: list[str] = []
         for tf in self._all:
             try:
                 tail = self.source.candles(
                     tf, TRACKING_REFRESH_BARS if tf == self.tracking else REFRESH_BARS)
             except DataUnavailable as exc:
-                self.last_error = str(exc)
+                failures.append(f"{tf}: {exc}")
                 log.warning("Refresh failed for %s: %s", tf, exc)
                 closed[tf] = False
                 continue
@@ -106,8 +120,19 @@ class MarketFeed:
                 newest_closed = merged.index[-2] if len(merged) > 1 else merged.index[-1]
                 closed[tf] = newest_closed != self._last_closed.get(tf)
                 self._last_closed[tf] = newest_closed
-        self.last_error = None
-        self.last_update = datetime.now()
+
+        # Every timeframe failing is a dead connection, not a slow one, and it
+        # is the case the terminal produces when MetaTrader is closed or has
+        # handed its IPC channel to another client. Naming it separately lets
+        # the service reconnect instead of retrying a socket that is gone.
+        self.all_failed = len(failures) == len(self._all)
+        if failures:
+            self.last_error = "; ".join(failures[:3])
+            if len(failures) > 3:
+                self.last_error += f" (and {len(failures) - 3} more)"
+        else:
+            self.last_error = None
+            self.last_update = datetime.now()
         return closed
 
     # -- access -------------------------------------------------------------

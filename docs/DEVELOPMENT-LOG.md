@@ -1,4 +1,4 @@
-# Development log
+﻿# Development log
 
 A running record of what was asked, what was built, what went wrong and why each
 decision was made. Requirements themselves are in
@@ -167,17 +167,24 @@ the **entry zone**. Three consequences:
 
 ---
 
-## Session 4 — the 50-pip day-trading rule
+## Session 4 — the 500-pip day-trading rule
 
-Implemented in `goldassist/signals/opportunity.py` with `PIP_SIZE = 0.10`, so
-50 pips is a 5.00 move, exactly as specified.
+Implemented in `goldassist/signals/opportunity.py` with `PIP_SIZE = 0.01`, so
+500 pips is a 5.00 ($5) move, exactly as specified.
+
+> **Convention correction.** This section originally read `PIP_SIZE = 0.10` with
+> a 50-pip floor. The price threshold it enforced — a 5.00 move — was already
+> right; only the pip convention was. The trader's own convention is 1 pip =
+> 0.01, so the same $5 floor is **500 pips**. Every pip figure the application
+> prints is now on that convention, and every price-space threshold in the
+> strategy detectors was rescaled alongside it so no filter loosened or tightened.
 
 Verified against the specification's own worked example:
 
 ```
-Entry 4400 → TP1 4405 = 50 pips, TP2 4415 = 150 pips, TP3 4430 = 300 pips
+Entry 4400 → TP1 4405 = 500 pips, TP2 4415 = 1500 pips, TP3 4430 = 3000 pips
 Assessment: MAJOR, qualifies = True
-"50 pips to the first objective and up to 300 pips if the structure extends"
+"500 pips to the first objective and up to 3000 pips if the structure extends"
 ```
 
 Eligibility is judged on the **first** objective; the grade reports the **full**
@@ -187,14 +194,14 @@ The floor is applied at two reference points that answer different questions:
 the decision engine measures from spot ("is there a worthwhile move from here?")
 and the suggestion from the entry zone ("from where I would actually get in?").
 
-`min_target_pips` is a per-profile setting (default 50.0), so a scalper can
+`min_target_pips` is a per-profile setting (default 500.0), so a scalper can
 lower it.
 
-**Open observation:** with a 50-pip floor this engine will rarely reject a setup
-on distance alone — Gold's ATR and zone-based entries mean most valid pullbacks
-clear 50 pips comfortably. The floor will bite mainly on breakout and range
-setups. If it never fires, raising it to 80–100 would make it a real filter
-rather than a formality. That is a settings change, not a code change.
+**Open observation:** with a 500-pip ($5) floor this engine will rarely reject a
+setup on distance alone — Gold's ATR and zone-based entries mean most valid
+pullbacks clear $5 comfortably. The floor will bite mainly on breakout and range
+setups. If it never fires, raising it to 800–1000 pips ($8–$10) would make it a
+real filter rather than a formality. That is a settings change, not a code change.
 
 ---
 
@@ -680,3 +687,938 @@ silent in this codebase already. Writing it caught two more:
    proportion to the evidence behind it.
 10. **Price an entry against the timeframe it was timed on.** This method is
    intraday; a swing-scale range must not veto an intraday trade.
+
+
+---
+
+## v1.3.0 — the measuring instrument (2026-09-06)
+
+An audit of the whole tree, asked for as "is any of this hard-coded, and what
+is missing?". The reassuring half of the answer: **nothing fabricates market
+data.** `data/source.py` raises rather than substituting when MT5 has nothing;
+`trader/macro.py` and `trader/intermarket.py` both refuse to invent a reading
+when a symbol is absent; there is no `random`, no mock, no synthetic candle
+anywhere in the tree.
+
+The unreassuring half: every engine reads a *real* measurement and then
+converts it to a score through coefficients nobody ever fitted. `_grade_sweep`
+is the pattern in miniature — `wick_depth_atr` and `reclaimed_bars` are
+measured off live candles, and the `40.0`, `30.0`, `7.0` and `20.0` that turn
+them into a number are judgment. The same is true of the seven pillar weights,
+every penalty magnitude, RSI 55/45, ADX 20, the session quality table and all
+32 `min_conviction` thresholds.
+
+That is not dishonest, and the README always said so. It is unmeasured — and
+the reason it stayed unmeasured turned out to be arithmetic, not neglect.
+
+### The instrument was too slow to take a reading
+
+`DEFAULT_MAX_EVALUATIONS` was 600. One evaluation runs the full multi-timeframe
+analysis at roughly two seconds, so 600 of them cover about six days of market.
+Six days cannot validate 32 detectors across six sessions, four score bands and
+two directions: every cell holds single digits, and a single-digit cell is
+noise wearing a number. The step was silently widened to fit, which under-fills,
+because arming needs a confirmation seen at an evaluation instant.
+
+So the strategy library was never measured, the weights were never fitted, and
+the central claim rested on nothing. The database agreed: 3 fired signals, 0
+closed outcomes, 0 backtests.
+
+The ceiling is now 20,000 and `backtest/parallel.py` splits the work across
+cores to reach it. A replay is stateful — the book carries setups between steps
+— so chunks cannot simply be handed out: a chunk starting at noon has no memory
+of the setup identified at eleven, and would both miss that trade and admit a
+duplicate of it. Every chunk therefore warms up `OVERLAP_STEPS` before the
+range it owns and records only trades entering inside it. `engine.run` was
+split into `plan` / `replay` / `compile_stats` so the merge happens on raw
+trades and raw counters, with nothing averaged yet — a parallel run and a
+sequential run of the same history produce the same figures.
+
+The overlap is wasted work by design, so chunks are only created when they are
+worth at least four warm-ups. Eight chunks of 300 steps with 300 steps of
+overlap each is 2400 wasted evaluations to save 2100 — slower than not forking.
+
+### No transaction costs anywhere
+
+Every R and pip figure, live and backtest, was gross. On this account the round
+turn is **26 pips** against a 500-pip first objective and a typical 250-pip
+stop: 5% of the target and over 10% of the risk.
+
+The spread is measured, not assumed. MetaTrader records a `spread` column on
+every candle it serves, so a backtest pays what the broker actually charged on
+those bars; live, the bid/ask is read directly. On XAUUSDm the two agree
+exactly — 260 points at a 0.001 point size, 0.26 of price, 26 pips. Commission
+and slippage cannot be observed from a feed, so they default to zero and are
+reported as unmodelled rather than invented.
+
+Three decisions inside that are worth recording:
+
+- **The round turn is charged once, against the result** — not smeared across
+  the fill and the exit. A long buys the ask and sells the bid, a short does
+  the reverse, and the candle series is a bid series either way, so the round
+  trip is exactly one spread whichever way the trade ran. Charging it this way
+  also leaves `fill_price` and `exit_price` meaning what they say.
+- **Net R keeps the gross denominator.** Inflating the risk by the round turn
+  as well is arithmetically defensible and useless: numerator and denominator
+  grow together, a stop-out comes to exactly -1.00R net as well as gross, and
+  the cost vanishes from the one number the statistics are built on. The test
+  caught this — it was written expecting a deeper loss and got -1.0 vs -1.0.
+  Fixed denominator, so a stop-out reads -1.10R, which is what the account
+  experienced.
+- **The reward/risk gate reads the net ratio**, and there both legs *do* move:
+  reward shrinks by the round turn and risk grows by it, because a long enters
+  at the ask while its stop sits on the bid. A gross 1.52 is a net 1.29, and a
+  gate reading the gross figure passes trades the method is meant to refuse.
+
+Strategies are now ranked on net R. Costs are charged per trade, so a gross
+ranking flatters whichever detector takes the most of them.
+
+### The event layer had never once fired
+
+`analysis/events.py` reads `~/.goldassist/calendar.json`, and that file did not
+exist — the app directory held only the database and the log. So the news
+blackout penalty in `confluence.py` had never fired on this installation, and
+setups were being scored straight through FOMC and CPI. Running
+`calendar_sync` wrote 44 events.
+
+It also expired silently. FOMC and CPI are carried as published tables, one
+year at a time; payrolls are rule-derived and continue forever. Crossing into
+an uncovered year would have left the app reporting "no releases due", which
+reads as an all-clear. `events.coverage()` now reports how far the calendar
+reaches and warns before it runs out.
+
+### Sessions drifted an hour, twice a year
+
+`trader/sessions.py` defined its windows as fixed UTC hours — calibrated for
+summer. London and New York change clocks on different dates and Tokyo not at
+all, so no fixed offset describes all three. In January the New York equity
+open falls at 14:30 UTC while the window meant to name it still sat at
+13:30-15:00, and the "US data window" stopped covering the 08:30 Eastern
+releases it exists for.
+
+`calendar_sync` had already solved this properly for events; sessions now use
+the same `ZoneInfo` mechanism and the two agree by construction. The refactor
+is verifiable rather than merely plausible: resolved for an August date it
+reproduces the old constants exactly — 23/7/12/16/19/21 — and for January it
+shifts each by the hour it should.
+
+### A report that printed almost nothing
+
+`backtest/__main__._report` was reading the outer `{"stats": ..., "trades": ...}`
+wrapper as if it were the statistics, so "Trades" printed a list of trade dicts
+and every other figure printed nothing at all. The per-strategy table read `n`
+and the summariser writes `setups`. Both fixed, and the report now shows gross
+and net side by side.
+
+### Added to the standing principles
+
+11. **Cost is part of the measurement.** A gross figure is not what the
+    account is paid, and a method whose edge disappears once the broker is
+    paid never had one. Measure the spread from the feed; never assume it.
+12. **An instrument too slow to take a reading is the finding.** When a
+    parameter has gone unvalidated for months, check whether validating it was
+    ever actually possible before blaming the parameter.
+
+### Two faults the first real run exposed
+
+Both were invisible to the unit tests and obvious the moment the thing was
+pointed at ten months of live Exness data.
+
+**The point size was assumed.** MetaTrader records a candle's spread in
+*points*, so converting it to a price needs the symbol's tick size, and
+`cost_model_for` defaulted to 0.01. XAUUSDm quotes to three decimals — point
+0.001 — so the first run announced a round turn of **240 pips** instead of 24.
+The credibility guard did not catch it: 240 pips is implausible for Gold but
+sat under the 300-pip ceiling, which is a reminder that a sanity bound wide
+enough never to fire on real data is also wide enough to miss a factor of ten.
+
+The fix is to ask the terminal (`symbol_details()["point"]`) where there is one,
+and to *infer* the precision from the quotes where there is not — never to
+assume. Ten months of M5 now price the round turn at 24 pips and the live
+bid/ask at 26, which agree.
+
+**The replay got slower the more history it was given.** `_slice_frames` asked
+`df.index + duration <= now`, which allocates a fresh DatetimeIndex and a full
+boolean array over every candle of every timeframe on every step. With M5 at
+60,000 bars that is hundreds of thousands of comparisons per evaluation, and it
+scales with the history — exactly backwards for a tool whose whole purpose is
+to replay more of it.
+
+The index is sorted and the duration constant, so the condition rearranges to
+`index <= now - duration` and `searchsorted` answers it in log time. Measured
+over the real frames: **71.5 ms/step to 1.9 ms/step, a 38x speedup**, with the
+candle indices identical across 200 sampled moments. Nothing about causality
+changed — the boundary is the same one, found a different way.
+
+### Proving the split, and the split being wrong
+
+The claim the parallel runner rests on — that cutting a stateful replay into
+chunks does not change its answer — is not self-evident and was not taken on
+faith. 900 evaluations of the real history were replayed twice, once as a
+single sequential pass and once cut in two with warm-up, and the trades
+compared field by field.
+
+**119 trades against 119, identical** on entry time, strategy, direction, entry
+price, stop, gross R and net R. The overlap does what it is there for.
+
+The same run also showed the split was **0.86x — slower than not forking**.
+Equal ranges are not equal work: only the first chunk begins at the start of
+the window, so only the first has no warm-up to pay. Two equal halves of 900
+gave one worker 450 evaluations and the other 750, and wall time is set by the
+slower one — a theoretical ceiling of 1.2x before process startup, which the
+startup then ate.
+
+Chunks are now balanced by *work* rather than by range: the first chunk is
+given a larger own-range, by exactly the warm-up every other chunk must pay, so
+each worker performs `(S + (N-1)V) / N` evaluations. For the 4,959-step window
+across three workers that is 1,853 apiece against 4,959 sequential — and the
+unit test asserts the spread between workers is zero rather than trusting the
+arithmetic.
+
+`MIN_CHUNK_OVERLAP_RATIO` would have caught the pathological case anyway: 900
+steps is below the 1,200 a three-way split needs to be worth its own warm-up,
+so the CLI would have run it sequentially. The test forced the split precisely
+to find out what happens when the guard is bypassed.
+
+### A history cache, because MetaTrader serves one client
+
+Every replay re-downloaded 137,700 candles, took a minute over it, and held the
+terminal for the duration — which meant a replay blocked the live application
+*and* every other replay, so two runs could not be compared without an hour of
+serial waiting. `history.save_cache` / `load_cache` write the frames once;
+`--cache` replays from the file with the terminal free. Pickle rather than CSV
+because the frames are timezone-aware and a round trip that quietly drops a
+timezone would corrupt the causality the whole replay depends on.
+
+The point size is asked of the terminal when one is open and inferred from the
+quoted precision when not. On the cached run the inference independently
+returned 0.001 — the same value `symbol_details()` reports.
+
+### The first valid measurement
+
+4,959 evaluations over ten months of XAUUSD (2025-10-31 to 2026-09-04),
+Default XAUUSD profile, step 4, three workers, 86 minutes. Backtest #1 — the
+first row in that table that is worth keeping.
+
+```
+Trades 738   Win rate 48.0%   Profit factor  1.73 gross / 1.67 net
+Average R      +0.369 gross / +0.347 net      Total R  +272.5 / +255.9
+Costs paid     17,640 pips = 16.6R, 6.1% of gross profit
+Max drawdown   16.81R net    Max consecutive losses  8
+```
+
+**The finding that matters is not the profit factor. It is this:**
+
+```
+score 85-100   n= 28   avg +0.755R   win 60.7%
+score 75-85    n=370   avg +0.536R   win 53.2%
+score 65-75    n=321   avg +0.127R   win 42.1%
+score below 65 n= 19   avg -0.225R   win 26.3%
+```
+
+The score band is monotonic in outcome. Every coefficient behind that number
+was chosen by judgment and none had ever been checked; the ordering they
+produce turns out to be real. That is the first evidence this project has that
+the confluence engine is measuring something rather than merely computing
+something.
+
+Secondary reads worth keeping:
+
+- **Positive in 11 of 12 months.** The one negative is August 2026 at -4.74R
+  over 74 trades. The edge is not one lucky fortnight.
+- **Not concentrated.** The best ten trades are 18% of the profit and the best
+  5% are 48% — normal for laddered targets, not a single outlier holding the
+  result up.
+- **Mean win +1.80R against mean loss -0.99R** at a 48% win rate. Internally
+  consistent with TP1 sitting near 1.8R and the stop at 1R, which is what the
+  profile asks for, so the arithmetic is not hiding anything.
+- **The best regimes are consolidation (+0.590) and potential reversal
+  (+0.471), not the trending ones** (+0.205 bullish, +0.222 bearish). Gold rose
+  across this window, so a long-bias artefact was the thing to suspect; the
+  regime split argues against it.
+- **Round Number Reaction is 36% of all trades** (269) at a 39.4% win rate and
+  +0.132R. It carries the most volume and the least quality — the first
+  candidate for a tighter `min_conviction`.
+- **Volatility Squeeze is the only clearly bad detector** (-0.581R over 7
+  trades) — and at n=7 the shrinkage in `expectancy.py` would correctly refuse
+  to act on it.
+
+### What this result is not
+
+- **In-sample.** One window, one profile, no walk-forward split. The
+  coefficients were not fitted to this data, which helps, but they were not
+  validated against held-out data either.
+- **A 9.2% fill rate.** 738 filled against 7,286 unfilled. That is the step-4
+  stride: arming needs a confirmation seen at an evaluation instant, and
+  sampling hourly misses most of them. The sample is therefore biased toward
+  setups that happened to be visible at the sampled moments, and a step-1 run
+  is needed before the fill rate means anything.
+- **Still missing slippage.** Spread and commission are charged; slippage is
+  not. At 738 trades a single pip per side is ~1,476 pips, about 4.6R.
+- **Not a claim about the future.** It is a claim that the engine's own score
+  ranks its own setups correctly over one ten-month sample.
+
+### Measured speedup
+
+The equivalence run put sequential replay at 1.69s per evaluation, so this run
+would have taken roughly 140 minutes on one core. It took 86 — about **1.6x on
+three workers of a four-core machine**, against a theoretical 2.68x. The gap is
+the warm-up overhead plus running three workers on four logical cores while the
+parent merges. Worth knowing before promising anyone a linear speedup.
+
+### The aggregate was not enough
+
+The monotonic score-band table is the kind of result that should be distrusted
+until it is cut up, because one strong stretch dragging an average produces
+exactly the same table. `backtest/stability.py` splits a stored run into
+contiguous folds and asks the question of each. It re-reads trades a replay
+already wrote, so it costs nothing and can be pointed at any stored run:
+`python -m goldassist.backtest --stability`.
+
+```
+band          fold 1      fold 2      fold 3      fold 4
+75-85     n= 92 +0.511  n=101 +0.617  n= 94 +0.688  n= 83 +0.292
+65-75     n= 79 +0.214  n= 72 +0.072  n= 80 +0.142  n= 90 +0.082
+```
+
+**75-85 beat 65-75 in 4 of 4 folds.** The ordering is a property of the engine,
+not of this ten months.
+
+The more useful finding is the one that stops a bad decision. Read as an
+aggregate, the 65-75 band's +0.127R looks like a candidate for exclusion, and
+the obvious move is to raise `min_score` from 70 to 75. The folds show that
+band **positive in all four**: those setups are weaker, not losing, and cutting
+them would have discarded +36.6R of real profit over the window.
+
+That is the empirical case for standing principle 5b — conviction sizes a
+trade, it never gates one — arrived at from the other direction. The
+architecture was already right; now there is evidence rather than an argument.
+
+Two things the module refuses to do, both learned here:
+
+- **Reason from a thin band.** The 85-100 band holds five to nine trades per
+  fold and swings from -0.17R to +1.58R. It is printed with a `?` and excluded
+  from the verdict. `MIN_FOLD_SAMPLE` is 8 to match `expectancy.MIN_SAMPLE`
+  deliberately — the two answer the same question, and disagreeing about it
+  would be indefensible.
+- **Invent a verdict.** With no fold carrying a usable sample on both sides it
+  says "not enough per-fold evidence" rather than comparing noise.
+
+Round Number Reaction, the highest-volume detector, went +0.241 / +0.170 /
++0.184 / **-0.071** across the folds. Three of four positive and the most
+recent negative — not enough to condemn it, enough to watch it.
+
+Fold 4 (2026-06-23 onward) is the weakest overall at +0.189R against +0.368,
++0.362 and +0.470 before it. Whether that is regime or noise is not answerable
+from one window, and it is the first thing a second window should be asked.
+
+### The honest stride, and what it cost the earlier conclusion
+
+`--last-days` narrows the *evaluated* range without touching the history behind
+it, which is what makes a step-1 run affordable — trimming the frames instead
+would leave D1 short of the 260 bars every engine needs. 4,049 evaluations at
+step 1 over the final 60 days, backtest #2.
+
+**The 9.2% fill rate was not a stride artefact.** Quadrupling the sampling
+density moved it to 12.2%. Most setups the engine identifies genuinely never
+fill: price does not come back to the zone, or the setup expires waiting. That
+is a real property of the method, not a measurement error, and it is the more
+useful reading — an engine that proposes eight ideas for every one that trades
+is doing something different from one that fills most of what it finds.
+
+**But the stride was hiding trades.** Over the same window:
+
+```
+step 4   n=141   netR= +14.82   avg=+0.105R   win 42.6%
+step 1   n=298   netR= +65.03   avg=+0.218R   win 41.9%
+```
+
+Twice the trades *and* twice the average R. The wide stride was not merely
+sampling less, it was sampling worse — arming needs a confirmation seen at an
+evaluation instant, and the ones an hourly clock catches are not a fair sample
+of the ones a fifteen-minute clock catches. The ten-month step-4 figures should
+therefore be read as a floor on trade count, and any future calibration run has
+to be step 1.
+
+### The finding that stops the obvious next move
+
+The plan after backtest #1 was to tighten `Round Number Reaction`, the
+highest-volume and lowest-quality detector. Comparing the two runs says: not on
+this evidence.
+
+```
+strategy                     10mo n   avgR    60d n   avgR    
+Round Number Reaction           269  +0.132      72  +0.085
+Order Block Mitigation           91  +0.411      31  +0.548
+Liquidity Sweep Reversal         83  +0.376      73  +0.150
+Imbalance Rebalance              81  +0.649      30  +0.162
+Rejection At Level               56  +0.256      35  +0.357
+VWAP Pullback                    22  +0.872       9  -0.127   SIGN FLIP
+```
+
+**Only 6 of 26 detectors carry 8 trades in both windows at all**, and one of
+those six changes sign. Imbalance Rebalance — the best strategy in the ten-month
+run — drops from +0.649R to +0.162R. Volatility Squeeze, the *worst* in run #1
+at -0.581R over 7 trades, comes back +6.10R over 6.
+
+The strategy library is too fragmented to evaluate per-strategy on ten months of
+Gold. Thirty-two detectors splitting 738 trades leaves a median of a dozen
+trades each, and a dozen trades is a coin flip with a decimal point.
+
+So the two results are not equally trustworthy, and the difference is sample
+size, not sophistication:
+
+- **The score-band ordering pools every strategy** — 321 to 370 trades per band
+  per fold — and held in 4 of 4 folds. That is a finding.
+- **Per-strategy expectancy** rests on 12 trades a detector. That is not, and
+  `expectancy.SHRINK_K = 25` was the right call: at n=30 an estimate is already
+  pulled to 55% of face value.
+
+Nothing per-strategy gets tuned until there is an order of magnitude more of it.
+
+
+---
+
+## Session N — the fundamental layer, the intraday auction, and a fill that was too good
+
+Asked for: an audit of the system against a global competitive institution, then
+the improvements that audit implied. Risk management explicitly out of scope —
+this application produces signals and analysis, it does not execute.
+
+### The audit finding that mattered most
+
+Backtest #1 implies an annualised Sharpe of 4.63. Institutional intraday
+systematic strategies in liquid macro run 1.0–2.5. A 4.6 is not a good result;
+it is a signal that a measurement is optimistic, and the job was to find which.
+
+Four candidates were identified. One turned out to be a real bug.
+
+### Fills could arrive before the evidence that justified them
+
+`signals/engine.update` arms a setup from the analysis at the caller's clock,
+then calls `resolve.apply_bars`, which walks **every unwalked bar** — reaching
+back to the previous cycle. Live that window is five seconds and the behaviour
+is correct. In a replay it is a full evaluation step, so a setup confirming at
+12:00 could be filled on the 11:05 bar, at a price only available *before* the
+confirmation existed. By construction that fill is better than anything the
+method could have obtained.
+
+`resolve.apply_bars` now passes `may_fill` per bar, false for anything that
+closed at or before `armed_at`. Those bars are still walked — they can still
+invalidate an idea, and an entered setup still resolves through them — only the
+entry is withheld. Live behaviour is unchanged because `apply_price` runs
+immediately afterwards with the current quote.
+
+One deliberate concession: a setup carrying `armed=True` with no `armed_at`
+(restored from a row written before the column existed) is allowed to fill.
+Refusing would turn a missing timestamp into a setup that can never enter and
+never resolve. Degrading to the older, looser behaviour is recoverable;
+degrading to silence is not.
+
+### The drawdown figure was describing the trade list, not the account
+
+`max_drawdown_r` is a cumulative sum in exit order. That cannot see a period
+when three positions were open and all underwater, because none of them had
+closed yet. Measured concurrency: **peak 4-5 positions, 23% of in-market time
+carrying two or more.**
+
+`backtest/rigour.py` marks the equity curve to market using each trade's stored
+MAE. Backtest #1's drawdown is **32.31R, not 16.81R**. Backtest #2's is 24.75R,
+not 10.28R. Roughly double in both cases, and the larger figure is the one that
+describes the experience.
+
+MAE and MFE are now carried on `BacktestTrade`. The resolver had been tracking
+both on every bar since it was written and nothing read them back.
+
+### Significance, tested twice because the trades overlap
+
+Trade-level t on backtest #1 is +6.27, which overstates itself: overlapping
+positions are not independent draws. Aggregated to monthly totals the
+clustering is removed and t is +4.63 across 11/12 positive months. The edge
+survives aggregation, which is the answer worth having. Backtest #2 has only
+three months and reports itself as untestable rather than borrowing the
+trade-level confidence.
+
+### Slippage turned out not to matter
+
+Reported as a sensitivity table rather than a guessed constant. At 3 pips per
+side backtest #1 loses 1.6% of its edge. The stops are wide enough to absorb
+it, and knowing that is worth more than a fabricated number would be.
+
+### Walk-forward: the finding that contradicts an earlier conclusion
+
+`backtest/walkforward.py` walks anchored train/test pairs and grades decisions
+made only from the training window.
+
+Selecting the better half of the strategy library on training-window expectancy
+**beat trading everything in 3 of 3 splits on backtest #1**, by +0.132R per
+trade. On backtest #2 it helped in 2 of 3 with one large negative. The earlier
+conclusion — that the library is too fragmented to select on — was drawn from
+two overlapping windows compared by eye; this measures it properly and the
+answer is "mixed, and worth re-testing on more history", not "no".
+
+The score-band ordering held out-of-sample with a rank correlation of +1.00, on
+a single testable split. `MIN_SPLITS_FOR_VERDICT` refuses to call that
+evidence: one window is an observation, and "held in all 1 splits" is both bad
+prose and bad statistics.
+
+### The fundamental layer
+
+`trader/intermarket` carried the note "real yields are Gold's dominant driver
+and this read is therefore blind to it". True of MetaTrader, not true of the
+world. Four keyless public sources now fill it:
+
+| Source | What it answers |
+|---|---|
+| FRED | 10y and 5y real yields, breakevens, 5y5y forward, the nominal curve, the broad dollar |
+| CFTC | Weekly Commitments of Traders — who is positioned and how crowded |
+| Yahoo | COMEX GC=F, GVZ implied volatility, ICE DXY, silver, VIX, oil |
+| composed | One directional read with the arithmetic shown |
+
+Live at the time of writing: the 10-year real yield is 2.42%, the **97th
+percentile of two years** — the opportunity cost of holding Gold is unusually
+high. Speculators are net long 228,124 contracts, 54.9% of open interest, the
+**94th percentile of stored history** — crowded long. Neither is available from
+any chart package.
+
+The COMEX reference also buys a data-integrity check nothing else could
+provide: the broker quote against the front month. The whole application rests
+on that one feed being honest and until now nothing verified it.
+
+Three findings from building it, all worth keeping:
+
+- **FRED's CDN resets any connection carrying `Accept: */*`.** The identical
+  request without the header is served in under a second. This cost an
+  afternoon: the failure presents as `ConnectionResetError` after a
+  twenty-second stall and looks exactly like the rate limiting it is not.
+  Adding an Accept header back will silently disable the entire macro layer.
+- **One bounded request per series beats a multi-series join.** FRED ignores
+  the date bound on a multi-series export, so the join runs from 1962 and
+  returns 535 KB in seven seconds against 9 KB in one for a bounded single
+  series. Seven small requests move an eighth of the bytes.
+- **The CFTC file is positional and headerless.** The failure mode of a
+  positional parse is a plausible wrong number, so every row is checked against
+  the report's own identities — reportable longs must sum, and reportable plus
+  non-reportable must equal open interest. A shifted layout is rejected rather
+  than believed.
+
+### Confidence must not rise as information falls
+
+The first composed read returned `strength: 1.0` from a single lagging driver:
+FRED was unreachable, positioning was the only voter, and unanimity among one
+voter was being reported as a unanimous macro picture.
+
+Strength is now the product of **how one-sided** the drivers are and **how many
+of them spoke**, scaled against the total weight available. The same read now
+returns 0.11 and says so in words. This is the same discipline
+`trader/expectancy.shrink` applies to a thin trade sample.
+
+### The macro layer cannot become a directional filter
+
+Standing constraint, and the one most worth stating: this is daily data
+informing an intraday decision. At full strength a completely one-sided macro
+picture moves conviction by a tenth; on a typical day it is worth two or three
+per cent. It can never gate a setup. A bearish macro read still lets a long be
+taken every hour of the day, which is the whole point for a trader who takes
+many trades and needs to profit from moves in both directions.
+
+### The intraday auction
+
+Three new analysis engines, all cross-timeframe, together 1.2% of a cached
+analysis cycle:
+
+**`analysis/vwap.py`** — anchored VWAP with volume-weighted standard-deviation
+bands, at the day, session and week anchors. Anchored rather than rolling
+because the useful reference is an event: from that moment the average is the
+real cost basis of everyone who has participated since. The slope is reported
+beside the bands because it decides which of two opposite trades a band touch
+justifies — against a flat anchor the touch is a fade, against a sloping one
+price rides the band and the same touch is a continuation.
+
+**`analysis/auction.py`** — prior day high/low/close, the Asian range, the
+initial balance, range extension, and how much of a typical daily range has
+been spent. Six known prices are available at the open rather than discovered
+afterwards, and each is tested repeatedly within one session in both
+directions.
+
+**`analysis/persistence.py`** — the variance ratio (Lo-MacKinlay, with the
+heteroskedasticity-robust z-statistic, because Gold's volatility clusters hard
+and the homoskedastic form reads that clustering as trend), the Hurst exponent
+by rescaled range, and Kaufman's efficiency ratio. Three unrelated estimators,
+because agreement between them is worth far more than any one alone and
+disagreement is a warning that none should be leaned on.
+
+`regime.py` already classified the market with ADX and Bollinger width. Those
+are heuristics that describe the recent path without ever testing whether it is
+distinguishable from a random walk. This does.
+
+It picks the **playbook**, not the direction — which is what lets a trader
+profit from any market change rather than only from the ones that suit a fixed
+style. On the current sample it reports "mean-reverting, low confidence" with
+Hurst and the variance ratio openly disagreeing, which is the honest answer.
+
+### Three new detectors, and a gate that is deliberately not one
+
+`strategies/auction.py` adds `vwap_band_fade`, `vwap_reclaim` and
+`ib_extension`.
+
+The first of those was very nearly a silent regression. It was written as
+`vwap_reversion` — a key the library **already used**, for an ATR-stretch
+strategy in `trend.py`. `REGISTRY[key] = ...` overwrites, `auction` imports
+last, so the existing detector would simply have stopped existing, along with
+every stored outcome attributed to its key, while the registry count still
+looked plausible. `base.strategy` now raises on a duplicate key.
+
+The two are genuinely different instruments for a similar idea: the existing
+one fades a stretch measured in ATR from the *indicator* VWAP, the new one
+fades an excursion measured in standard deviations from the *anchored* day
+VWAP, and only when the anchor is flat. Where they agree the book merges them
+into one setup carrying both arguments, which is a better outcome than either
+having been deleted in favour of the other.
+
+`vwap_band_fade` and `vwap_reclaim` are opposite trades and both are correct in
+different regimes. The obvious design lets `persistence` decide which may fire.
+That would be the same mistake the standing rule warns against: the regime
+estimate is itself uncertain, it changes within a session, and a detector
+silenced by it produces nothing on precisely the days the estimate is wrong.
+
+So the regime **sizes** these candidates and never suppresses them. A reversion
+setup in a trending market still appears, with its conviction cut to a quarter
+and the reason stated on the card.
+
+### Tests
+
+108 to 143. The five that matter most: a bar closing before `armed_at` cannot
+fill; a bar after it fills normally; an unarmed setup can still be invalidated;
+a missing `armed_at` degrades to the old behaviour rather than to silence; and
+the macro read cannot move conviction by more than a tenth in either direction.
+
+
+---
+
+## v1.8.0 — the live record disagreed with the backtest (2026-09-12)
+
+Asked for: a check of an external gap analysis of the original specification,
+then the improvements still open. The analysis was written against the PDF, so
+about half its gaps (entry/stop/target, a net reward/risk gate, score
+calibration, capped pillars, the look-ahead fix) had already been closed. What
+it did not have was the first live week.
+
+### The finding
+
+| | Backtest #2 (step 1) | Live, 7–11 Sep |
+|---|---|---|
+| Filled trades | 298 | 18 |
+| Win rate | 41.9% | 22% |
+| Result | +0.22R per trade | −8.26R total |
+| Trades reaching +2R | — | 0 of 18 |
+
+Drawing 18 trades from the backtest 5,000 times puts the live total at the 1st
+(backtest #1) and 2nd (backtest #2) percentile. The trades are clustered — four
+longs in 23 minutes on the 9th, four shorts after CPI on the 11th — so the true
+band is wider and a binomial on the win rate alone gives ~7%. A warning, not a
+verdict. Enough to go looking, and what turned up were three ways the replay was
+kinder than the market.
+
+### 1. Fills at the best price in the bar
+
+`resolve.step` filled an armed setup that entered its zone without reaching the
+preferred price at `min(max(low, zone.low), zone.high)` — the **bar's low** for a
+long. That is the one price in the bar no order can count on, and `_fill` then
+measured risk from it, shrinking the denominator every R is divided by. Live, the
+same rule met a quote rather than a bar: all 21 live fills came in at or worse
+than the preferred price, averaging 0.13R worse. The backtest's entire edge is
++0.22R per trade.
+
+`_entry_fill` now gives the preferred price only when the bar reaches it (a limit,
+never credited better), and otherwise the first in-zone price the bar offered —
+its open if it opened inside, else the zone edge it crossed. Live behaviour for a
+quote is unchanged.
+
+### 2. The news clock was the wall clock
+
+`mtf.analyse` called `events.upcoming()` with no `now`. Live that is fine. In a
+replay of March it reads September's calendar, so **no historical release was
+ever penalised in any backtest**. It now reads the analysis clock — the newest
+candle's *close*, not the open MetaTrader labels it with.
+
+It also only looked ahead. CPI printed at 12:30 UTC on 2026-09-11 and four shorts
+filled at 12:40, 12:57, 13:11 and 13:25: three losses. `last_high_impact` and a
+`news_aftermath` penalty (60 minutes, per profile) cover the hour after.
+
+Not fixed, and said so in the README: the calendar has no FOMC or CPI dates
+before January 2026. The late-2025 dates were moved by the government shutdown,
+and a guessed calendar is worse than a known gap.
+
+### 3. Trades held through the rollover
+
+`trade_expiry_minutes = 720` from a 16:00 UTC fill is 04:00 the next morning, for
+a trader who never holds overnight. Filled trades now close five minutes before
+the 17:00 New York rollover, at the open of the bar that crosses the deadline,
+and nothing fills from then until an hour after, when the spread has settled.
+New York time via `ZoneInfo`, so it moves with daylight saving exactly as the
+broker's rollover does; verified 21:55 UTC in January and 20:55 in July.
+
+### Record integrity: filled trades lost on restart
+
+Three of the 21 live fills were `unresolved`. `book.restore` dropped any setup
+older than `trade_expiry_minutes`, filled or not, so a trade left running over a
+restart lost its result. Filled trades now come back for up to seven days, and
+`service._catch_up_restored` walks the M1 history from where the resolver stopped
+on the first connected cycle. If the broker's history does not reach back that
+far the trade is *not* walked — skipping the gap could turn a stop inside it into
+a win — and stays `unresolved`, which is the truth.
+
+### Correlated exposure
+
+Four cards on one move are one bet. `book._mark_exposure` tells each setup how
+many filled same-direction trades are on nearby (within 2 ATR or 90 minutes), puts
+that on the card's risks, and the desk sizes the banner setup at `1/(1+n)`. Sizing,
+not gating — standing principle 5b holds. `exposure_at_fill` is frozen on every
+trade and the backtest reports `by_exposure`, so whether stacked trades earn less
+is measured rather than assumed.
+
+### Breakeven, as a hypothesis
+
+Three live losers went +1.08R, +1.28R and +1.44R before stopping at −1R. The desk
+has always *advised* breakeven at 1R; the record never applied it.
+`breakeven_in_record` makes the resolver do it, from the bar after the excursion
+(the same bar would assume favourable-first). **Off by default**: it also turns
+winners that dip back to entry into scratches, and only a replay can net the two.
+
+### The measurement layer the analysis asked for
+
+- **Evidence per trade.** `Suggestion.features` records each pillar's share of its
+  maximum and each penalty, at build and again at arming; `BacktestTrade` carries
+  it.
+- **`--fit`** (`backtest/fit.py`): L2 logistic regression of "did it pay" on that
+  evidence, anchored walk-forward, AUC against the judged score on each test fold.
+  Suggested `weight_overrides`, bounded 0.5–1.5, are printed only if the fit wins
+  a majority of folds, and never applied. Standard library only.
+- **Monte Carlo** in `rigour.py`: 5,000 reshuffles, fixed seed, 50/95/99th
+  percentile drawdown and losing streak. Backtest #2's historical 10.3R booked
+  drawdown sits against a reshuffled 95th percentile of 21.6R.
+- **`--live-check`**: the forward test above, with a stated caveat below 50 live
+  trades because clustering narrows the band.
+- **`--reserve-holdout` / `--holdout`**: a slice every run stops before, replayable
+  once, recorded in settings.
+- **Variant count** printed with every run.
+- **Score record in every explanation.** `backtest/calibration.py` hands the AI and
+  the offline narrative the stored record of the current score band — trades, win
+  rate, net R, window — with caveats for thin bands and for runs made before the
+  fill fix. The prompt now requires it, as history and never as odds, plus the
+  single strongest argument against any BUY or SELL.
+
+### Deliberately not done
+
+- **Bid/ask on the path.** Shifting ask-side triggers by a spread while also
+  charging a round turn double-counts it, and doing it properly changes what every
+  stored R means. ~3% of a typical stop; documented instead.
+- **A definitions appendix** (the analysis's G6). The definitions exist in code;
+  writing them out is worth doing but changes no number.
+- **Regime hysteresis and exchange volume.** Open.
+
+### Verification — partial, and why
+
+Windows Application Control blocked numpy's DLL for every Python on the machine
+during this session, so nothing importing pandas could run: not the suite, not a
+backtest, not `build.bat`. What *was* run: the resolver's fill, rollover and
+breakeven logic (17 checks, pandas stubbed — `step` never touches it), the events
+clock, the weight fit on synthetic data where the true weights are known, Monte
+Carlo, the forward check and the score record (21 checks), all passing, plus a
+byte-compile of every changed module. `tests/test_realism.py` holds all of it in
+the suite's own form, with fixed 2030 dates so no check depends on the hour it runs.
+
+**Before anything else once numpy loads:** run the full suite, then
+`python -m goldassist.backtest --cache --step 1 --last-days 60`, then
+`--live-check` against the new run. Backtests #1 and #2 are superseded.
+
+### Verified, and the first honest measurement (2026-09-13)
+
+The numpy block was Smart App Control (policy `{0283ac0f…}`), which began
+refusing the unsigned `_multiarray_umath` pyd after a policy refresh at 12:59 on
+2026-09-12 — the same file ships inside the packaged app, so the installed build
+was broken too. The trader turned it off. Full suite then passed once four older
+test modules were made independent of the hour (`tests/clock.py` — they had
+failed only because the suite ran at 17:19 New York, inside the new rollover
+window). The first build failed on a OneDrive-locked `dist\GoldAssistant`; the
+retry passed all 82 packaged checks.
+
+Backtest #3 — same 60 days as #2, step 1, the v1.8.0 resolver:
+
+```
+            #2 (old fills)    #3 (v1.8.0)
+trades          298               248
+win rate       41.9%             38.7%
+avg net R     +0.218            +0.070
+total net R   +65.03            +17.34
+PF net          1.37              1.12
+trade-level t     —               +0.79  (not significant)
+MTM drawdown   24.75R            31.24R
+```
+
+About two-thirds of the apparent edge was the fill model. What is left is not
+distinguishable from zero on 248 trades. The live week sits at the 3rd percentile
+of #3 — closer than the 1st/2nd of #1 and #2, still outside the band.
+
+What the honest run changes:
+
+- **The 65–75 band loses in all four folds** (−0.41, −0.21, −0.16, −0.30R;
+  −29.3R over 102 trades) while 75–85 makes +34.4R. The v1.3.0 finding that
+  65–75 was "weaker, not losing" and must not be cut came from the optimistic
+  fills and does not survive them. Raising `min_score` to 75 is now the leading
+  candidate — but these 60 days have now been looked at, so the change has to be
+  confirmed on data that was not.
+- **TP1 is further than these trades travel.** Median MFE 1.12R; 55% reach 1R,
+  39% reach 1.5R, 24% reach 2R, against TP1 averaging ~1.86R.
+- **Liquidity Sweep Reversal** is +1.45R gross, −1.01R net over 64 trades — it
+  only works before costs, and is 9 of the 18 live trades.
+- **Stacked trades** earn +0.049R against +0.076R standalone (54 vs 194 trades);
+  in the expected direction, too small a sample to size from.
+- **The rollover rule** closed 24 trades at +0.24R average — it is not cutting
+  winners.
+- **The weight fit** beat the judged score in 1 of 4 folds. The judged weights
+  stay; 248 trades is too few to fit seven pillars.
+- **Fold 4 (20 Aug – 3 Sep) lost −11.2R**, the same stretch the live week
+  continued into.
+
+### The score-band tables were measuring the outcome (2026-09-13)
+
+"Default v2" (min_score 75, Liquidity Sweep Reversal off) was tested against the
+default on the 60 days before 2026-07-06, which suggested neither change:
+
+```
+                     Default #5     Default v2 #4
+trades                  221             111
+avg net R             +0.172          +0.208
+total net R           +37.97          +23.11
+PF net                  1.32            1.40
+max drawdown R         24.58            6.90
+```
+
+Better per trade and far smaller drawdown, less in total. But v2 still recorded
+**36 trades in the 65–75 band** with a minimum score of 75 — and that exposed the
+fault. `BacktestTrade.score` was the suggestion's score **at close**. The score is
+re-measured every cycle after the fill and drifts with the outcome (losers −1.8 to
+−3.8 points, winners ~0). Grouping on it sorts losers into low bands after the
+fact. Rebuilt from the conviction and context recorded at arming:
+
+```
+                   by closing score           by ENTRY score
+#3 Jul–Sep   65-75 −0.287  75-85 +0.285   65-75 +0.094  75-85 +0.056  85+ +0.003
+#5 May–Jul   65-75 −0.107  75-85 +0.319   65-75 +0.119  75-85 +0.190  85+ +0.404
+```
+
+At entry the judged score barely ranks trades — AUC 0.43–0.58 — and on #3 not at
+all. **Every score-band table this project has published, including the v1.3.0
+"monotonic in outcome" finding and the stability folds, grouped on the closing
+score and overstated the ordering.** The v1.3.0 argument against raising
+`min_score` and today's argument for it were both read off that artefact.
+
+Out of sample, the sweep rule failed outright: Liquidity Sweep Reversal made
++19.3R over 48 trades on May–July. Stacked trades, on the other hand, confirmed:
+−0.128R against +0.230R standalone (36 vs 185).
+
+Fixed: `Suggestion.entry_score` is frozen at arming; `BacktestTrade.score` and the
+live outcome record use it, with `final_score` kept beside it; stored runs carry
+`score_basis: "entry"` and the score record warns on runs that do not. "Default v2"
+is withdrawn.
+
+**The weight fit, against a fair comparison.** Its earlier loss (1 of 4 folds) was
+to the closing score, which carries the drift. Against the entry score, on the 469
+trades of #5 then #3 in time order, the fit out-ranked the judged score in **4 of 4**
+folds (AUC 0.53–0.65 against 0.43–0.54), and its top third beat its bottom third in
+every fold. It raises structure confirmation and liquidity sweeps and lowers the
+other five pillars. That is **"Fitted v3"**, rescaled so the maximum stays 100, and
+it is being replayed against the default on 2026-03-06 → 2026-05-05 — history
+neither the fit nor any decision so far has seen.
+
+### Fitted v3 on unseen history, and what held across three windows
+
+2026-03-05 → 2026-05-03, which neither the fit nor any decision had seen:
+
+```
+                     Default #6     Fitted v3 #7
+trades                  214             234
+avg net R             +0.201          +0.185
+total net R           +43.00          +43.28
+PF net                  1.38            1.34
+t                      +2.12           +2.02
+```
+
+A tie. The fit's out-ranking of the judged score on May–September did not carry
+to March–May, so by the rule set before the run, **Fitted v3 is withdrawn** and
+the judged weights stay. On this window the judged score *did* rank by entry
+score (65-75 +0.112, 75-85 +0.318, 85+ +0.326), as it did on May–July and did not
+on July–September: two of three, weak and unstable, not a finding to tune on.
+
+Pooling the default over the three honest, non-overlapping windows (#6, #5, #3):
+
+```
+                           n      avg net R    total      t
+all trades               683       +0.144     +98.31   +2.73
+standalone               544       +0.211    +114.62   +3.50
+stacked on an open trade 139       −0.117     −16.31   −1.11
+```
+
+Two conclusions survive everything this session tried to break:
+
+1. **The default has a small positive edge after costs** on March–September —
+   +0.14R per trade, t 2.7 — decaying across the windows (+0.20, +0.17, +0.07)
+   and not yet confirmed by the live record (18 trades, −8.26R).
+2. **Stacked exposure is where it goes to lose.** Trades filled while a
+   same-direction trade was already open nearby returned −0.12R; standalone
+   trades +0.21R. The direction held in all three windows. The desk's `1/(1+n)`
+   sizing, built before any of this was measured, is the right shape; a trader
+   who simply skips stacked setups would have kept +114.6R instead of +98.3R.
+
+### Added to the standing principles
+
+13. **The live record is the acceptance test.** A backtest the live record falls
+    outside of is describing a different system, however good its statistics.
+14. **A fill is the price on offer, not the best price in the bar.** Any
+    simulated execution that would have beaten every live fill is wrong.
+15. **Every clock in a replay is the replay's clock.** One wall-clock read left
+    a whole layer inert in every backtest ever run.
+
+---
+
+## v1.9.0 — skip stacked trades, date outcomes by their exit (2026-10-01)
+
+### What the live record said (2026-09-07 → 2026-10-01)
+
+51 filled trades, −10.0R. Since v1.8.0 (2026-09-14): 32 trades, −0.76R
+(−0.02R/trade), inside the noise of the backtest's +0.07 to +0.20R. Stacked
+trades were still the losing group live: −0.18R against +0.18R standalone.
+
+### Built
+
+1. **Stacked setups are skipped, not halved** (`StrategyProfile.skip_stacked`,
+   default on). The resolver refuses a fill while a same-direction trade on the
+   same move (entries within 2 ATR, or filled within 90 minutes) is open at
+   that candle. The setup is retired as untaken with `exit_reason = "skipped"`;
+   the desk shows "skip — same move already on" with a zero size. The card
+   still shows and alerts. Backtests report `skipped_stacked`.
+2. **`setup_outcomes.closed_at` is the exit time.** It was the time the row was
+   written, so a trade resolved on the morning after a restart counted in the
+   next day's loss count, losing streak and cooldown. Old filled rows are
+   redated from `fired_signals.closed_at` on startup (51 rows on the live DB).
+3. **Agreement is recorded at the fill** (`confirmations_at_fill`, on the
+   suggestion, the outcome row and every backtest trade; grouped as
+   `by_confirmations_at_fill`).
+
+### A finding that did not survive
+
+Grouped on the closing confirmation count, 5+ confirmations looked strongly
+predictive: +0.27R against +0.02R in all three backtest windows, +0.47R
+against −0.53R live. It is the closing-score artefact again. Agreement keeps
+arriving after the fill and winners stay open longer: live winners gained 2.6
+confirmations after filling, losers 1.1. Reconstructed at the fill from the
+alert log, the live split shrinks to +0.07R (n=8) against −0.25R. **No sizing
+rule is built on confirmations** until a replay groups on the at-fill count.
+
+### Still open
+
+The skip-on / skip-off replay of the last 60 cached days (Jul 6 → Sep 3) was
+stopped by low system memory before producing results. It is the next step.
+

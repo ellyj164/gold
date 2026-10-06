@@ -12,7 +12,8 @@ from .base import (Candidate, Context, StrategyDef, ZoneHint, REGISTRY,
 
 # Import for the side effect of registration. Order sets nothing but the
 # order strategies appear in the settings list.
-from . import smc, trend, ranges, patterns, breakouts, reversals  # noqa: E402,F401
+from . import (smc, trend, ranges, patterns, breakouts, reversals,  # noqa: E402,F401
+               auction)  # noqa: E402,F401
 
 __all__ = [
     "Candidate", "Context", "StrategyDef", "ZoneHint", "REGISTRY",

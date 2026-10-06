@@ -171,10 +171,21 @@ def session_options() -> list[dict]:
     interface, so a change to the windows cannot leave the filter offering a
     session that no signal will ever carry.
     """
+    from datetime import datetime, timezone
+
     from .trader import sessions
 
+    # Resolved for today rather than read off the table.
+    #
+    # The windows are anchored to Tokyo, London and New York wall-clock time
+    # and converted through the timezone database, so their UTC hours differ
+    # between summer and winter -- there is no fixed pair of numbers to read.
+    # `boundaries` does that conversion for a given moment, which is also what
+    # keeps this filter agreeing with the sessions actually stamped onto
+    # signals: both now come from the same function.
     options = []
-    for name, start, end, quality, description in sessions.WINDOWS:
+    for name, start, end, quality, description in sessions.boundaries(
+            datetime.now(timezone.utc)):
         options.append({
             "name": name,
             "label": sessions.LABELS.get(name, name.title()),

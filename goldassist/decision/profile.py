@@ -48,27 +48,35 @@ class StrategyProfile:
     # ``min_score`` on purpose: a strategy setup worth watching is worth
     # hearing about while there is still time to get to the entry zone.
     min_alert_score: int = 60
-    # The smallest move worth taking intraday. 50 pips on XAUUSD is 5.00 of
-    # price. This is a floor for the *first* objective, never a cap: larger
-    # targets are always reported when the structure supports them.
-    min_target_pips: float = 50.0
+    # The smallest move worth taking intraday. 500 pips on XAUUSD is 5.00 of
+    # price -- a $5 move. This is a floor for the *first* objective, never a
+    # cap: larger targets are always reported when the structure supports them.
+    min_target_pips: float = 500.0
     # Weight multipliers, keyed by evidence factor name. 1.0 = catalogue default.
     weight_overrides: dict = field(default_factory=dict)
     # Skip setups when a high-impact economic release is within this many minutes.
     news_blackout_minutes: int = 30
+    # ...and penalise them for this long *after* one. The minutes following a
+    # CPI or payrolls print are where the whipsaw is; a window that only looks
+    # ahead let four shorts fill 10-55 minutes after the 2026-09-11 CPI.
+    news_aftermath_minutes: int = 60
 
     # --- the strategy library ----------------------------------------------
     # Which detectors may produce setups. None means every registered strategy,
     # which is the point of having a library: a profile that runs one pattern
     # sees one pattern's worth of opportunity.
     enabled_strategies: tuple[str, ...] | None = None
+    # Detectors switched off on top of that. Named rather than listing every
+    # other strategy in ``enabled_strategies``, because an explicit allow-list
+    # silently excludes every detector added after the profile was written.
+    disabled_strategies: tuple[str, ...] = ()
     # A setup whose first objective cannot clear ``min_target_pips`` is not
     # built at all. Set True only to inspect setups the pip rule rejects.
     allow_below_minimum: bool = False
 
     # --- resolution --------------------------------------------------------
     # Which target closes the signal and books the result. 1 = bank at the
-    # first objective, which is the 50-pip rule the method is built on; 2 or 3
+    # first objective, which is the 500-pip rule the method is built on; 2 or 3
     # let a runner go, with the stop moved to breakeven behind it.
     close_at_target: int = 1
     # Move the stop to the fill price once a target has been banked.
@@ -79,10 +87,27 @@ class StrategyProfile:
     # A filled trade that has neither hit its stop nor its target by now is
     # closed at market. A day trade held overnight is a different trade.
     trade_expiry_minutes: int = 720
+    # Close every filled trade just before the 17:00 New York rollover, and
+    # fill nothing from then until the post-rollover spread has settled. The
+    # expiry above cannot express "flat by the end of the day": 720 minutes
+    # from a late fill is the middle of the next night.
+    flat_before_rollover: bool = True
+    flat_minutes_before_rollover: int = 5
+    rollover_quiet_minutes: int = 60
+    # Skip a setup whose fill would stack on an open same-direction trade on
+    # the same move, rather than sizing it down. Stacked trades lost money in
+    # the backtest (-0.12R, n=139) and live (-0.18R, n=18) while standalone
+    # trades made it; False restores the old half-size behaviour, and is how a
+    # replay measures what the skip is worth.
+    skip_stacked: bool = True
 
     # --- trade management --------------------------------------------------
     # Move the stop to breakeven once the trade is this many R in favour.
     breakeven_at_r: float = 1.0
+    # Whether the *record* applies that move, rather than only advising it.
+    # Off until a backtest shows it pays: it turns some losers into scratches
+    # and some winners into scratches too, and only the net of the two counts.
+    breakeven_in_record: bool = False
     # Fraction of the position to bank at the first objective.
     partial_at_tp1: float = 0.5
     # Timeframe whose swings the trailing stop follows.
@@ -97,7 +122,8 @@ class StrategyProfile:
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        for k in ("bias_timeframes", "setup_timeframes", "required_conditions"):
+        for k in ("bias_timeframes", "setup_timeframes", "required_conditions",
+                  "disabled_strategies"):
             d[k] = list(getattr(self, k))
         return d
 
@@ -105,14 +131,19 @@ class StrategyProfile:
     def from_dict(cls, data: dict) -> "StrategyProfile":
         base = asdict(cls())
         base.update({k: v for k, v in data.items() if k in base})
-        for k in ("bias_timeframes", "setup_timeframes", "required_conditions"):
-            base[k] = tuple(base[k])
+        for k in ("bias_timeframes", "setup_timeframes", "required_conditions",
+                  "disabled_strategies"):
+            base[k] = tuple(base[k] or ())
         return cls(**base)
 
 
 # Ready-made profiles covering the common ways of trading Gold.
 BUILTIN_PROFILES = {
     "Default XAUUSD": StrategyProfile(),
+    # Two challengers to the default were built and replayed on history that
+    # did not suggest them, and both were withdrawn (DEVELOPMENT-LOG, v1.8.0):
+    # "Default v2" (min_score 75, sweep reversal off) and "Fitted v3" (pillar
+    # weights fitted walk-forward). Neither beat this profile out of sample.
     "Strict Smart Money": StrategyProfile(
         name="Strict Smart Money",
         required_conditions=(
@@ -174,7 +205,7 @@ BUILTIN_PROFILES = {
         thesis_revision_minutes=20,
     ),
     # Every strategy, a low watch threshold and a bank at the first objective:
-    # the configuration that surfaces the most 50-pip opportunities per day.
+    # the configuration that surfaces the most 500-pip opportunities per day.
     "Maximum Coverage": StrategyProfile(
         name="Maximum Coverage",
         required_conditions=(),

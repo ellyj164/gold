@@ -564,6 +564,20 @@ def _penalties(analysis: dict, direction: str, profile: StrategyProfile) -> list
                 "warning",
             ))
 
+    # ...and the release that has just printed. The first hour after CPI or
+    # payrolls is where Gold whipsaws through levels the setup was built on;
+    # the look-ahead window alone left that hour entirely unguarded.
+    released = (analysis.get("events") or {}).get("last_high_impact")
+    aftermath = getattr(profile, "news_aftermath_minutes", 60) or 0
+    if released and released.get("minutes_since") is not None:
+        if 0 <= released["minutes_since"] <= aftermath:
+            out.append(Penalty(
+                "news_aftermath", "High-impact release just printed", 8.0,
+                f"{released['title']} {released['minutes_since']} minutes ago - "
+                "levels are being tested by the reaction, not by the market's structure",
+                "warning",
+            ))
+
     return out
 
 

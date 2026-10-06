@@ -23,8 +23,8 @@ from .base import Candidate, Context, ZoneHint, RANGE, EITHER, COUNTER
 
 # Minimum room, in pips, for a range trade to be worth taking. A range whose
 # whole height is smaller than the day-trading minimum has no trade in it.
-MIN_RANGE_PIPS = 60.0
-PIP = 0.10
+MIN_RANGE_PIPS = 600.0
+PIP = 0.01
 
 
 def _measure_range(ctx: Context, timeframe: str, bars: int) -> dict | None:
@@ -171,7 +171,7 @@ def range_breakout(ctx: Context) -> list[Candidate]:
         (0.15, base.clamp(1.0 - ctx.distance_atr(edge) / 2.0, 0.0, 1.0)),
     )
     # The measured move -- range height projected from the break -- is the
-    # standard objective and is what makes these setups worth 50+ pips.
+    # standard objective and is what makes these setups worth 500+ pips.
     projected = edge + rng["height"] if broken_up else edge - rng["height"]
     return [Candidate(
         key="range_breakout", name="Range Breakout Retest", family=RANGE,

@@ -104,8 +104,8 @@ def test_target_resolves_as_a_win():
     check("it is recorded as TARGET HIT", suggestion.status == signals.TARGET_HIT,
           suggestion.status)
     check("the outcome is a win", suggestion.outcome == "win", str(suggestion.outcome))
-    check("the result is at least the 50-pip minimum",
-          suggestion.result_pips >= 50.0, f"{suggestion.result_pips} pips")
+    check("the result is at least the 500-pip minimum",
+          suggestion.result_pips >= 500.0, f"{suggestion.result_pips} pips")
     check("R is positive", suggestion.r_multiple > 0, str(suggestion.r_multiple))
     check("the exit price is the target", suggestion.exit_price == round(tp1, 3),
           str(suggestion.exit_price))
@@ -134,6 +134,47 @@ def test_stop_resolves_as_a_loss():
           str(suggestion.r_multiple))
     check("pips lost are reported", suggestion.result_pips < 0,
           str(suggestion.result_pips))
+
+
+def test_stop_gapped_over_fills_at_the_open():
+    print("a stop the market gapped over fills at the open, not at the level")
+    suggestion, prof = armed_setup()
+    zone = suggestion.entry_zone
+    stop = suggestion.stop
+
+    # Second bar opens 3.00 below the stop: the level was never on offer.
+    gap_open = stop - 3.0
+    resolve.apply_bars(suggestion, bars([
+        (4400, 4400, zone.preferred - 0.2, zone.preferred),
+        (gap_open, gap_open + 0.1, gap_open - 0.5, gap_open),
+    ]), prof)
+
+    check("the setup is stopped out", suggestion.status == signals.STOPPED_OUT,
+          suggestion.status)
+    check("the fill is the open, not the stop",
+          suggestion.exit_price == round(gap_open, 3),
+          f"{suggestion.exit_price} (stop was {stop:.3f})")
+    check("the loss is worse than one R", suggestion.r_multiple < -1.0,
+          str(suggestion.r_multiple))
+
+
+def test_stop_traded_through_fills_at_the_level():
+    print("a stop price traded through fills at the level, with nothing invented")
+    suggestion, prof = armed_setup()
+    zone = suggestion.entry_zone
+    stop = suggestion.stop
+
+    # The bar opens above the stop and trades down through it: the level was
+    # available, so the fill is the level and no slippage is fabricated.
+    resolve.apply_bars(suggestion, bars([
+        (4400, 4400, zone.preferred - 0.2, zone.preferred),
+        (zone.preferred, zone.preferred, stop - 0.5, stop - 0.2),
+    ]), prof)
+
+    check("the fill is exactly the stop", suggestion.exit_price == round(stop, 3),
+          f"{suggestion.exit_price} vs {stop:.3f}")
+    check("the loss is still about one R", -1.2 <= suggestion.r_multiple <= -0.8,
+          str(suggestion.r_multiple))
 
 
 def test_wick_between_polls_is_caught():
@@ -335,6 +376,19 @@ def test_library_finds_more_than_one_idea():
           all(c.key == "zone_reaction" for c in disabled),
           str({c.key for c in disabled}))
 
+    # Switching one detector off must leave every other one running.
+    everything = {c.key for c in found}
+    if everything:
+        off = sorted(everything)[0]
+        trimmed = profile_module.StrategyProfile.from_dict(
+            dict(prof.to_dict(), name="trimmed", disabled_strategies=[off]))
+        book = signals.SuggestionBook()
+        kept = {c.key for c in book._candidates(                   # noqa: SLF001
+            make_analysis(4400.0), make_decision(4400.0, 76.0), trimmed, None, None)}
+        check("a disabled strategy produces nothing", off not in kept, str(kept))
+        check("and every other strategy still runs", kept == everything - {off},
+              str(everything - {off} - kept))
+
 
 def test_registry_is_well_formed():
     print("registry hygiene")
@@ -354,6 +408,9 @@ def test_registry_is_well_formed():
 
     registry = set(strategies.keys())
     for name, prof in profile_module.BUILTIN_PROFILES.items():
+        disabled_unknown = set(prof.disabled_strategies) - registry
+        check(f"profile '{name}' disables only real strategies", not disabled_unknown,
+              str(disabled_unknown))
         enabled = prof.enabled_strategies
         if enabled is None:
             continue
@@ -363,8 +420,13 @@ def test_registry_is_well_formed():
 
 
 def main() -> int:
+    from tests.clock import outside_rollover
+    outside_rollover()
     for test in (test_fill_requires_confirmation, test_target_resolves_as_a_win,
-                 test_stop_resolves_as_a_loss, test_wick_between_polls_is_caught,
+                 test_stop_resolves_as_a_loss,
+                 test_stop_gapped_over_fills_at_the_open,
+                 test_stop_traded_through_fills_at_the_level,
+                 test_wick_between_polls_is_caught,
                  test_ambiguous_bar_assumes_the_worst, test_unfilled_setup_is_untaken,
                  test_expiry, test_runner_moves_to_breakeven,
                  test_book_clears_and_refills, test_book_merges_agreeing_strategies,

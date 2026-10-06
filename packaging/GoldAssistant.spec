@@ -29,7 +29,15 @@ hiddenimports = [
     "uvicorn.protocols.http.auto",
     "uvicorn.protocols.http.h11_impl",
     "uvicorn.protocols.websockets.auto",
+    # Both websocket implementations. `auto` already resolves to the sans-io
+    # one -- uvicorn's own `websockets_impl` now emits a deprecation warning
+    # saying `--ws websockets` will point there in a future release -- so the
+    # sans-io module is what actually serves the dashboard's live push today.
+    # `websockets_impl` stays listed because `auto` falls back to it, and
+    # config.py resolves either by string at runtime (WS_PROTOCOLS), which is
+    # precisely what PyInstaller's scanner cannot follow.
     "uvicorn.protocols.websockets.websockets_impl",
+    "uvicorn.protocols.websockets.websockets_sansio_impl",
     "uvicorn.lifespan.on",
     "uvicorn.lifespan.off",
     "websockets.legacy",
@@ -50,8 +58,15 @@ hiddenimports = [
 # October and 13:30 UTC in November. Without the data files bundled, the
 # import still succeeds and the *call* raises ZoneInfoNotFoundError, so this
 # is the kind of omission that only shows up in the packaged build.
+#
+# `websockets` is here for the same class of reason: the sans-io protocol
+# implementation reaches into six of its submodules (server, http11, frames,
+# datastructures, exceptions, extensions.permessage_deflate), and the whole
+# package is small enough that collecting it is cheaper than discovering a
+# missing one from a packaged build that cannot open its own dashboard.
 for package in ("uvicorn", "anthropic", "httpx", "httpcore", "certifi",
-                "fastapi", "starlette", "webview", "MetaTrader5", "tzdata"):
+                "fastapi", "starlette", "webview", "MetaTrader5", "tzdata",
+                "websockets"):
     try:
         pkg_datas, pkg_binaries, pkg_hidden = collect_all(package)
         datas += pkg_datas

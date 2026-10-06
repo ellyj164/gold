@@ -280,6 +280,9 @@ def _compact_facts(decision: dict, analysis: dict) -> dict:
             "waiting_for": decision.get("waiting_for"),
             "profile": decision.get("profile"),
         },
+        # What this score band has historically been worth, with its sample
+        # size and caveats. The explanation must state it; see the prompt.
+        "score_record": decision.get("score_record"),
         "evidence": (decision.get("confluence", {})
                      .get(decision.get("direction", "bullish"), {})
                      .get("evidence", [])),
@@ -315,6 +318,102 @@ def _compact_facts(decision: dict, analysis: dict) -> dict:
         # technical setup, and until v1.2.0 the analyst was never told one was
         # coming.
         "events": analysis.get("events"),
+        # Where the day's business has been done, and how stretched price is
+        # from it. The analyst was describing structure without ever knowing
+        # the reference every desk measures itself against.
+        "vwap": _vwap_digest(analysis),
+        # The day's clock-derived references and what shape the session is
+        # taking. Trend day or rotation changes what the same setup is worth.
+        "session": _auction_digest(analysis),
+        # Whether moves are currently persisting or reverting, and how
+        # confident that is. Decides which playbook fits, not which direction.
+        "persistence": _persistence_digest(analysis),
+        # Why Gold is priced where it is: real yields, positioning, implied
+        # volatility. The analyst could previously explain what the chart did
+        # and never why, which is the half a trader cannot get elsewhere.
+        "fundamentals": _fundamental_digest(analysis),
+    }
+
+
+def _vwap_digest(analysis: dict) -> dict | None:
+    """The anchors, compacted: a level, a slope and a distance each."""
+    read = analysis.get("vwap") or {}
+    if not read.get("available"):
+        return None
+    anchors = {}
+    for name, anchor in (read.get("anchors") or {}).items():
+        anchors[name] = {"vwap": anchor.get("vwap"),
+                         "position": anchor.get("position"),
+                         "sigma": anchor.get("distance_sigma"),
+                         "slope": anchor.get("slope"),
+                         "bands": anchor.get("bands")}
+    return {"session": read.get("session"), "anchors": anchors,
+            "observations": read.get("observations")}
+
+
+def _auction_digest(analysis: dict) -> dict | None:
+    """Prior day, overnight range, initial balance, and how spent the day is."""
+    read = analysis.get("auction") or {}
+    if not read.get("available"):
+        return None
+    return {
+        "prior_day": read.get("prior_day"),
+        "asia_range": read.get("asia"),
+        "today_range": read.get("today"),
+        "initial_balance": read.get("initial_balance"),
+        "extension": (read.get("extension") or {}).get("direction"),
+        "range_used": read.get("range_used"),
+        "day_type": read.get("day_type"),
+        # Which of those references price is sitting on right now, which is the
+        # difference between a list of levels and a reason to look at the chart.
+        "testing_now": read.get("tests"),
+        # `observations` is deliberately omitted. Unlike the other blocks here,
+        # every sentence in it is derived from fields already in this digest --
+        # the day type, the range-used note and `testing_now` carry the same
+        # readings in the form the model needs. Sending both roughly doubled
+        # the session block for no added information.
+    }
+
+
+def _persistence_digest(analysis: dict) -> dict | None:
+    read = analysis.get("persistence") or {}
+    if not read.get("available"):
+        return None
+    return {k: read.get(k) for k in
+            ("regime", "confidence", "hurst", "efficiency_ratio", "playbook",
+             "observations") if k in read}
+
+
+def _fundamental_digest(analysis: dict) -> dict | None:
+    """The macro picture, with the caveats that must travel with it.
+
+    Deliberately carries ``drivers`` and ``cautions`` as written rather than
+    re-deriving them here: those sentences already say what each number means
+    and what it does not, and a second phrasing of the same reading is a second
+    chance to phrase it wrongly.
+    """
+    read = analysis.get("fundamentals") or {}
+    if not read.get("available"):
+        return None
+    reference = read.get("reference") or {}
+    return {
+        "bias": read.get("bias"),
+        "strength": read.get("strength"),
+        "headline": read.get("headline"),
+        "drivers": read.get("drivers"),
+        "cautions": read.get("cautions"),
+        "volatility_regime": read.get("volatility_regime"),
+        "implied_vs_realised_vol": {
+            "implied": reference.get("implied_vol"),
+            "realised": reference.get("realised_vol"),
+            "ratio": reference.get("vol_ratio"),
+        },
+        "positioning": {
+            k: (read.get("positioning") or {}).get(k)
+            for k in ("net", "net_pct_oi", "percentile", "crowding",
+                      "report_date", "age_days")
+        },
+        "feed_healthy": read.get("feed_healthy"),
     }
 
 

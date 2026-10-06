@@ -23,8 +23,8 @@ import numpy as np
 from . import base
 from .base import Candidate, Context, ZoneHint, COUNTER, EITHER, PATTERN, TREND
 
-PIP = 0.10
-MIN_MOVE = 50.0 * PIP
+PIP = 0.01
+MIN_MOVE = 500.0 * PIP
 
 
 def _swings(ctx: Context, timeframe: str, kind: str, count: int = 6) -> list[dict]:

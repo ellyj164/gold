@@ -244,6 +244,49 @@ def _startup_error(message: str) -> None:
         print(message, file=sys.stderr)
 
 
+def _exit_process(server, thread: threading.Thread, app, code: int) -> None:
+    """Shut everything down and end the process, whatever is still running.
+
+    Closing the window used to return from ``main`` and leave the rest to the
+    interpreter. The analysis loop and its reconnect kept running meanwhile,
+    and a reconnect calls ``mt5.initialize`` -- which starts MetaTrader 5 when
+    it is not open. So a trader who closed this application, then closed MT5,
+    watched MT5 open itself again.
+
+    Now the service is stopped explicitly (which forbids any further connect),
+    the terminal this application started is closed, and the process ends with
+    ``os._exit`` so no leftover thread can outlive the window.
+    """
+    service = getattr(app.state, "service", None)
+
+    def _cleanup() -> None:
+        if service is not None:
+            # First, before anything slow: no more terminal launches.
+            service.source.close_for_good()
+        server.should_exit = True
+        thread.join(timeout=10)
+        if service is not None:
+            try:
+                service.stop()
+            except Exception:
+                log.debug("Service stop during exit failed", exc_info=True)
+            from .data import terminal
+
+            try:
+                terminal.close(service.source.launched_pids)
+            except Exception:
+                log.warning("Could not close MetaTrader 5", exc_info=True)
+
+    log.info("Shutting down.")
+    worker = threading.Thread(target=_cleanup, name="exit", daemon=True)
+    worker.start()
+    worker.join(timeout=25)
+    if worker.is_alive():
+        log.warning("Shutdown did not finish in time; exiting anyway.")
+    logging.shutdown()
+    os._exit(code)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="AI Gold Trading Decision Assistant")
     parser.add_argument("--browser", action="store_true",
@@ -301,7 +344,9 @@ def main(argv: list[str] | None = None) -> int:
             "Check that MetaTrader 5 is open and logged in, then try again.\n\n"
             f"Full log:\n{APP_DIR / 'goldassist.log'}"
         )
-        return 1
+        # A startup still stuck connecting would otherwise keep retrying, and
+        # keep opening MT5, after the trader dismissed this message.
+        _exit_process(server, thread, app, 1)
 
     log.info("Gold Decision Assistant serving at %s", url)
 
@@ -314,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if not args.browser and _open_window(url):
-        return 0
+        _exit_process(server, thread, app, 0)
 
     if not args.browser:
         log.warning("Opening in the default browser at %s. The desktop window "
@@ -325,7 +370,7 @@ def main(argv: list[str] | None = None) -> int:
             thread.join(timeout=1)
     except KeyboardInterrupt:
         pass
-    return 0
+    _exit_process(server, thread, app, 0)
 
 
 if __name__ == "__main__":

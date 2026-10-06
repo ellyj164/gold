@@ -118,14 +118,16 @@ MetaTrader 5  ->  Market feed  ->  Analysis engines  ->  Confluence  ->  Decisio
 | Module | Responsibility |
 |---|---|
 | `goldassist/data/` | MT5 connection, candle cache, live ticks |
-| `goldassist/analysis/` | Indicators, market structure, candlesticks, S/R, supply & demand, liquidity, FVG, order blocks, regime, multi-timeframe assembly |
+| `goldassist/analysis/` | Indicators, market structure, candlesticks, S/R, supply & demand, liquidity, FVG, order blocks, regime, anchored VWAP, session auction, statistical persistence, multi-timeframe assembly |
+| `goldassist/fundamentals/` | Real yields, inflation breakevens, the dollar, CFTC positioning, COMEX reference prices and implied volatility — why Gold is priced where it is |
 | `goldassist/decision/` | Confluence scoring, BUY/SELL/WAIT engine, risk, strategy profiles |
 | `goldassist/strategies/` | The strategy library: 23 independent detectors across smart money, trend, range and price action |
 | `goldassist/signals/` | Entry zones, triggers, lifecycle, bar-accurate resolution, and the setup book that tracks every live setup |
 | `goldassist/trader/` | The behaviour layer: top-down method, day character, session view, trade management, outcome memory, dollar context |
 | `goldassist/ai/` | Claude analyst, chart-image vision, deterministic offline explanations |
-| `goldassist/backtest/` | Historical replay through the live engines |
+| `goldassist/backtest/` | Historical replay through the live engines, plus statistical rigour and out-of-sample walk-forward |
 | `goldassist/storage/` | Signal history, trading journal, backtests, settings |
+| `goldassist/costs.py` | Transaction costs — spread measured from the feed, commission and slippage from config |
 | `goldassist/api/` | Local FastAPI server, analysis loop, WebSocket push |
 | `goldassist/ui/` | Trading terminal (custom canvas chart + panels) |
 
@@ -188,6 +190,134 @@ but price sits under major resistance" correctly becomes **WAIT**.
 > was measured against ten months of Gold and could not reach 70/100 even once; as a single
 > pillar the scale behaves as intended.
 
+### Why Gold is priced where it is
+
+The chart says *what* Gold has done. It cannot say *why*, and for the one
+instrument where the why is unusually legible that was a real gap. Four keyless
+public sources fill it, each cached, each independently optional, none of them
+a dependency — with no connection at all the technical engine runs exactly as
+it did before.
+
+| Reading | Source | Why it matters |
+|---|---|---|
+| **10-year real yield** | FRED (`DFII10`) | The dominant driver. Gold pays no coupon, so what it competes with is the yield *after* inflation. Read as a level and as a weekly change |
+| Inflation breakevens, 5y5y forward | FRED | Separates "inflation hedge" buying from "rate cut" buying — the two behave differently |
+| Nominal curve, broad dollar | FRED | The 2s10s shape, and a better dollar measure than inverting EURUSD |
+| **CFTC positioning** | Weekly COT | How crowded speculative length is against its own history. The one input no retail chart package carries |
+| **Implied volatility (GVZ)** | CBOE | What the options market expects, against what Gold has actually realised. Not derivable from price |
+| COMEX front month | `GC=F` | The venue Gold is actually priced on — and a check that the broker's quote has not drifted from it |
+
+Three rules govern the whole layer:
+
+- **A missing input is stated, never invented.** Every reading carries whether
+  it is available and where it came from. Stale is labelled with its age, not
+  discarded — yesterday's real yield is a better answer than none, because the
+  series only updates once a day anyway.
+- **Confidence falls when information falls.** The composed strength is the
+  product of how one-sided the drivers are *and* how many of them reported. A
+  read assembled from one lagging source cannot present itself as a unanimous
+  macro picture.
+- **Fundamentals contextualise; they never gate.** At full strength a
+  completely one-sided macro picture moves conviction by a tenth. It can never
+  suppress a setup, in either direction. This is daily data informing an
+  intraday decision, and a macro opinion quietly becoming an all-day
+  directional filter is the failure mode the bound exists to prevent.
+
+### The intraday auction
+
+Three engines that read the day's own reference prices rather than price shape:
+
+**Anchored VWAP** at the day, session and week, with volume-weighted standard
+deviation bands. Anchored rather than rolling, because the useful reference is
+an event — from that moment the average is the real cost basis of everyone who
+has participated since. The anchor's *slope* is reported beside the bands
+because it decides which of two opposite trades a band touch justifies: against
+a flat anchor the touch is a fade, against a sloping one price rides the band
+and the same touch is a continuation.
+
+**Session structure** — prior day high/low/close, the Asian range, the initial
+balance, whether price has extended beyond it, and how much of a typical daily
+range is left. Six known prices before any pattern has been detected at all,
+each tested repeatedly within a session and in both directions.
+
+**Statistical persistence** — the Lo-MacKinlay variance ratio with a
+heteroskedasticity-robust z-statistic, the Hurst exponent, and Kaufman's
+efficiency ratio. `regime.py` classifies with ADX and Bollinger width; those
+describe the recent path without ever testing whether it is distinguishable
+from a random walk. This does, with three unrelated estimators, and reports
+their disagreement rather than forcing a verdict.
+
+It picks the **playbook, not the direction**: trade breakouts and let runners
+go in a persistent regime, fade the band extremes and bank the first objective
+in a reverting one. The regime changes within a session — Gold routinely
+reverts through Asia and trends through London — and the same setup deserves
+opposite treatment on either side of that switch.
+
+Three detectors trade against these references: `vwap_band_fade`,
+`vwap_reclaim` and `ib_extension`. The library already had two VWAP strategies
+(`vwap_pullback` and `vwap_reversion`) built on the *indicator* VWAP and an ATR
+stretch; these read the *anchored* VWAP and measure excursion in standard
+deviations, and only fade when the anchor is flat. Where the two agree the book
+merges them into one setup with both arguments attached, which is what
+confluence means.
+
+`vwap_band_fade` and `vwap_reclaim` are opposite trades and both are correct in
+different regimes, so the regime **sizes** them and never silences them — a
+fade setup in a trending market still appears, with its conviction cut to a
+quarter and the reason on the card.
+
+### Checking a backtest is not luck
+
+```bash
+python -m goldassist.backtest --rigour         # significance, drawdown, costs
+python -m goldassist.backtest --walk-forward   # would it have been usable in advance?
+python -m goldassist.backtest --stability      # did the ordering hold across folds?
+```
+
+`--rigour` reports four things the summary alone cannot:
+
+- **Significance at two scales.** Trades overlap — this method runs up to five
+  positions at once — so the trade-level t-statistic overstates its own
+  confidence. The test is run again on monthly totals, where the clustering is
+  aggregated away, and the monthly figure is the one to believe.
+- **Mark-to-market drawdown.** The reported figure is a cumulative sum in exit
+  order, which cannot see a period when three positions were open and all
+  underwater. Marked to market it is roughly **double**: 32.3R rather than
+  16.8R on the ten-month run. That is what the account went through.
+- **Concurrency.** Every R figure assumes one unit of risk per trade. This
+  measures whether that assumption holds.
+- **Cost sensitivity.** Slippage cannot be observed from a candle feed, so
+  instead of guessing a constant this reports how much the result moves at
+  several. On this method, wide structural stops make it 1.6% of the edge.
+
+`--walk-forward` grades decisions made only from a training window against the
+test window that decision could not see — the difference between an ordering
+that was consistent in hindsight and one that would have been usable in advance.
+
+```bash
+python -m goldassist.backtest --live-check        # is the live record inside the backtest's band?
+python -m goldassist.backtest --fit               # do fitted evidence weights beat the judged score?
+python -m goldassist.backtest --reserve-holdout 45    # set aside the last 45 days, once
+python -m goldassist.backtest --holdout           # replay that holdout, once
+```
+
+`--live-check` is the acceptance test the rest answer to. It draws as many trades
+from the backtest as the live record holds, thousands of times, and reports where
+the live total falls. **On the first live week it fell at the 1st–2nd percentile
+of backtests #1 and #2** — with 18 clustered trades that is a warning, not a
+verdict, but it is the reason v1.8.0 exists.
+
+`--fit` regresses whether each trade paid on the evidence it armed on, walk-forward,
+and prints suggested `weight_overrides` only if the fit ranks out-of-sample trades
+better than the judged score. It never applies them. Runs stored before v1.8.0
+carry no evidence per trade and cannot be fitted.
+
+`--rigour` and every new run now also print a **Monte Carlo** band: the same
+trades reshuffled 5,000 times, so the drawdown to plan for is the 95th percentile
+rather than the one ordering that happened. Each run also says how many variants
+have already been run over its window, because the best of many is optimistic by
+construction.
+
 ### Strategy profiles
 
 `Default XAUUSD`, `Strict Smart Money`, `Trend Continuation`, `Reversal Hunter`,
@@ -199,11 +329,11 @@ and where the trade is banked. Profiles are editable and saved to
 | Setting | What it changes |
 |---|---|
 | `enabled_strategies` | Which detectors may produce setups. Unset means all 23 — `Trend Continuation` and `Reversal Hunter` each run their own subset |
-| `close_at_target` | Which objective banks the trade. `1` closes at TP1, honouring the 50-pip rule; `2` lets a runner go with the stop moved to breakeven behind it |
+| `close_at_target` | Which objective banks the trade. `1` closes at TP1, honouring the 500-pip rule; `2` lets a runner go with the stop moved to breakeven behind it |
 | `min_reward_risk` | A gate, not a note: the objective actually banked must clear it |
 | `setup_expiry_minutes` / `trade_expiry_minutes` | When an unfilled idea, or a trade going nowhere, is retired |
 
-`Maximum Coverage` is the configuration that surfaces the most 50-pip opportunities per
+`Maximum Coverage` is the configuration that surfaces the most 500-pip opportunities per
 day: every strategy, a low watch threshold, banked at the first objective.
 `High Conviction` is the opposite trade-off — fewer setups, each held for a runner.
 
@@ -349,30 +479,71 @@ once.
 
 ---
 
-### The 50-pip day-trading rule
+### The 500-pip day-trading rule
 
-On XAUUSD one pip is 0.10 of price, so **50 pips is a 5.00 move**. Fifty pips is the
-smallest opportunity worth taking intraday — a floor, never a ceiling.
+On XAUUSD one pip is 0.01 of price, so **500 pips is a 5.00 move — a $5 move in
+Gold**. Five hundred pips is the smallest opportunity worth taking intraday — a
+floor, never a ceiling.
 
 | First objective | Grade |
 |---|---|
-| under 50 pips | Below minimum — generally not worth a signal |
-| 50–99 pips | Good day-trading opportunity |
-| 100–199 pips | Strong opportunity |
-| 200+ pips | Major intraday opportunity |
+| under 500 pips ($5) | Below minimum — generally not worth a signal |
+| 500–999 pips ($5–$10) | Good day-trading opportunity |
+| 1000–1999 pips ($10–$20) | Strong opportunity |
+| 2000+ pips ($20+) | Major intraday opportunity |
 
 Three things this does *not* do:
 
-- **It never caps a target at 50 pips.** Eligibility is judged on the first objective;
-  the grade reports the *full* potential, so a setup with 50 pips to TP1 and 300 to TP3
-  is presented as Major, not as a 50-pip trade.
-- **It never turns distance into a signal.** 50 pips being available makes a setup
+- **It never caps a target at 500 pips.** Eligibility is judged on the first objective;
+  the grade reports the *full* potential, so a setup with 500 pips to TP1 and 3000 to TP3
+  is presented as Major, not as a 500-pip trade.
+- **It never turns distance into a signal.** 500 pips being available makes a setup
   *eligible*; direction, entry zone, confirmation and invalidation still come from the
   technical analysis. Both must hold.
 - **It never hides a small setup silently.** When nothing clears the floor the card still
   shows the best available objectives, flagged, with the shortfall stated.
 
 The minimum is per-profile (), so a scalper can lower it.
+
+---
+
+### What the broker takes
+
+Every figure this application produced used to be gross. Nothing subtracted a spread, a
+commission or a slip, which on XAUUSD is not a rounding error: on this account the round
+turn is **26 pips against a 500-pip first objective** — 5% of the target, and over 10% of a
+typical 250-pip stop.
+
+The spread is **measured, never assumed**. MetaTrader records the spread on every candle it
+serves, so a backtest pays what the broker actually charged on those bars, rollover blowouts
+included; live, the current bid/ask is read directly. The two agree to the pip on this
+account. Commission and slippage cannot be observed from a data feed at all, so they default
+to zero and are reported as unmodelled rather than invented — set them in `config.json` if
+you are on a raw-spread account:
+
+```json
+{ "costs": { "commission_per_lot": 7.0, "slippage_pips": 1.0, "enabled": true } }
+```
+
+Gross and net are both kept, side by side, because the difference between them is itself
+the finding: a method with a gross expectancy of +0.15R and a net expectancy of −0.02R does
+not have a small edge, it has none, and only showing both makes that visible.
+
+- `result_pips` and `r_multiple` stay gross and keep their original meaning, so stored
+  history remains comparable across the change.
+- `net_result_pips` and `net_r_multiple` are what the statistics and the reward/risk gate
+  read. Net R uses the *same* denominator as gross — the initial stop distance — so a
+  stop-out reads as −1.10R rather than −1.00R. Inflating both sides instead would make a
+  stop-out come to exactly −1.00R net as well as gross, and the cost would vanish from the
+  one number the statistics are built on.
+- `min_reward_risk` is now applied to the **net** ratio. A gross 1.52 on a 250-pip stop is a
+  net 1.29, and a gate reading the gross figure passes trades the method is meant to refuse.
+- Backtests rank strategies on net R, not gross. Costs are charged per trade, so a gross
+  ranking flatters whichever detector takes the most of them.
+- `fill_price` and `exit_price` are untouched — they remain the prices on the chart where
+  the trade opened and closed. The round turn is charged once against the result instead,
+  which is also the correct model: a long buys the ask and sells the bid, a short does the
+  reverse, and the candle series is a bid series either way.
 
 ---
 
@@ -477,8 +648,75 @@ setups arm on a confirmation seen at an evaluation instant, and sampling every t
 misses most of them. `step` and `unfilled_setups` in the results tell you how much to trust
 the fill rate.
 
+**It runs across every core.** That two-second evaluation used to cap a replay at 600
+evaluations — about six days of market, which cannot validate 32 detectors across six
+sessions and four score bands, because every cell holds single digits. The ceiling is now
+20,000, and `goldassist/backtest/parallel.py` splits the history into contiguous chunks,
+one per core, to reach it.
+
+The split is exact rather than approximate. A replay is stateful — the setup book carries
+setups between steps — so chunks cannot simply be handed out: a chunk beginning at noon
+has no memory of the setup identified at eleven, and would both miss that trade and admit
+a duplicate of it. Every chunk therefore starts 300 evaluations *before* the range it owns,
+purely to build book state, and records only trades whose entry falls inside its own range.
+The overlap is wasted work by design; it is the price of the parallelism.
+
+**This was verified, not assumed.** 900 evaluations of real history were replayed twice —
+once sequentially, once split in two — and compared field by field: **119 trades against
+119, identical** on entry time, strategy, direction, entry price, stop, gross R and net R.
+
+Chunks are balanced by *work*, not by range. Only the first chunk starts at the beginning
+of the window, so only the first has no warm-up to pay; splitting 900 evaluations into two
+equal halves gives one worker 450 and the other 750, and wall time is set by the slower.
+Measured, that came to **0.86× — slower than not forking at all**. The first chunk is now
+given a larger range by exactly the warm-up the others pay, so every worker performs
+`(S + (N−1)·300) / N` evaluations — 1,853 each for a 4,959-step window across three cores.
+
+Runs shorter than four warm-ups per chunk are not split, for the same reason.
+
+```bash
+python -m goldassist.backtest --step 4 --max-evaluations 12000
+python -m goldassist.backtest --cache             # replay from saved history
+python -m goldassist.backtest --workers 1         # force sequential
+```
+
+**`--cache` is worth knowing about.** Every replay used to re-download 137,700 candles and
+hold the terminal for the duration, so a replay blocked the live application *and* every
+other replay. The first run now saves the frames to `~/.goldassist/backtest-history.pkl`;
+`--cache` replays from that file with MetaTrader free, and `--refresh-cache` re-downloads.
+Without the cache, close the Gold Assistant window first — MT5 serves one client at a time.
+The in-app backtest (`POST /api/backtests`) stays sequential for the same reason.
+
 History depth is bounded by what your MT5 terminal holds. Open each timeframe's chart and
 scroll back to make the terminal download more.
+
+### Does the result hold?
+
+A single monotonic score-band table is weaker evidence than it looks: one strong stretch
+can drag an average into the right order and leave the impression that the score ranks
+setups correctly when it only did so in March. That distinction decides what may be done
+with the result — an ordering that holds in every independent period may be calibrated
+against; one that appears only in the total may not.
+
+```bash
+python -m goldassist.backtest --stability          # most recent run
+python -m goldassist.backtest --stability 1 --folds 6
+```
+
+It re-reads a stored run's trades and asks the same question of each fold. Nothing is
+re-executed, so it is free and repeatable on any stored backtest. Two rules it follows:
+
+- **Sample size sits beside every figure.** Bands with fewer than 8 trades in a fold are
+  marked `?` and excluded from the verdict — the 85-100 band swings from −0.17R to +1.58R
+  on five to nine trades, and a table of bare averages would invite the wrong conclusion.
+- **A weak band is not a losing band.** 65-75 averaged +0.127R overall, which reads like a
+  candidate for exclusion until the folds show it positive in *all four*. Raising
+  `min_score` to 75 would have discarded +36.6R of real profit. Weak setups belong in the
+  sizing layer, not on the cutting-room floor — which is what the application already
+  does, and now has evidence for.
+
+  That is the empirical case for the standing rule that **conviction sizes a trade and
+  never gates one.**
 
 ---
 
@@ -492,6 +730,8 @@ Everything lives in `~/.goldassist/`:
 | `config.json` | MT5 path, symbol, AI model, port |
 | `profiles.json` | your strategy profiles |
 | `goldassist.log` | application log (rolled to `.log.1` past 8 MB) |
+| `calendar.json` | economic releases, generated by `python -m goldassist.analysis.calendar_sync` |
+| `backtest-history.pkl` | cached deep history, so a replay need not hold the terminal |
 
 The Gold symbol is auto-detected (`XAUUSD`, `XAUUSDm`, …). Override with
 `GOLDASSIST_SYMBOL`; override the terminal path with `GOLDASSIST_MT5_PATH`.
@@ -509,15 +749,64 @@ The Gold symbol is auto-detected (`XAUUSD`, `XAUUSDm`, …). Override with
   *not* included — their dates are neither rule-derivable nor to hand, and a calendar
   that guesses is worse than one with a known gap. Add them by hand to
   `~/.goldassist/calendar.json`; hand-added entries survive regeneration.
-- **The strategy library has never been backtested.** The look-ahead fault above
-  invalidated every stored run, and the 32 detectors plus the resolver have not yet
-  been replayed once on corrected data. Treat the framework as unproven until they are.
-- **No transaction costs anywhere.** No spread, commission, slippage or swap is
-  subtracted in any module. Every R and pip figure, live and backtest, is gross.
+
+  FOMC and CPI dates are carried as published tables, one year at a time, so the file
+  has an end date; payrolls are rule-derived and continue indefinitely. `events.coverage()`
+  reports how far the calendar still reaches and warns before it runs out, because
+  "no releases due" and "this file expired in December" must never read alike.
+- **Backtests #1 and #2 are optimistic and must be re-run.** Until v1.8.0 an armed
+  setup that entered its zone without reaching the preferred price filled at the
+  bar's low (a short at its high) — the single best price in the bar, which no
+  order gets; live fills averaged 0.13R worse than the preferred price. The replay
+  also read the economic calendar on the wall clock, so no historical release was
+  ever penalised, and trades were carried through the rollover. Every figure below
+  predates those fixes. Re-run with `--cache --step 1` before trusting any of it;
+  stored runs made before the fix are labelled as such wherever the score record
+  quotes them.
+- **The calendar has no FOMC or CPI dates before January 2026**, so the first two
+  months of the current history window run without a news penalty. The late-2025
+  release dates were moved by the US government shutdown and are not guessed.
+- **Bid/ask is not modelled on the path.** The candle series is bid; a buy limit
+  really fills when the *ask* reaches it, and a short's stop triggers a spread
+  earlier. One round-turn spread is charged against every result, which covers
+  the cost but not the handful of extra stop-outs and missed fills. Small against
+  a 600–1,000-pip stop; not zero.
+- **The strategy library has now been backtested once.** 4,959 evaluations over ten
+  months (2025-10-31 → 2026-09-04), 738 trades, net profit factor 1.67, and — the result
+  that matters — the score band is **monotonic in outcome**: 85-100 averages +0.755R,
+  75-85 +0.536R, 65-75 +0.127R, below 65 −0.225R. The confluence engine ranks its own
+  setups correctly.
+
+  Cut into four contiguous folds, **75-85 beat 65-75 in 4 of 4** — the ordering is a
+  property of the engine, not of one strong stretch. See "Does the result hold?" below.
+
+  That is still one window, one profile, in-sample. It is not a claim about the future
+  and not a substitute for walk-forward validation. Treat it as the first evidence.
+- **Most setups never fill, and that is real.** 9.2% of identified setups filled at a
+  step-4 stride; a step-1 run over the same data moved it only to 12.2%. Price does not
+  come back to the zone, or the setup expires waiting. The engine proposes roughly eight
+  ideas for every one that trades.
+- **The stride was hiding trades, though.** Over the same window, step 1 found 298 trades
+  at +0.218R against step 4's 141 at +0.105R — twice the trades *and* twice the average R.
+  Arming needs a confirmation seen at an evaluation instant, and an hourly clock does not
+  catch a fair sample of them. **Any calibration run must use `--step 1`.**
+- **Per-strategy figures are not yet trustworthy.** Only 6 of 26 detectors carry 8 trades
+  in both tested windows, and one of those six changes sign between them (VWAP Pullback,
+  +0.872R → −0.127R). Imbalance Rebalance, the best detector over ten months at +0.649R,
+  comes back at +0.162R over sixty days. Thirty-two detectors splitting 738 trades leaves
+  a median of a dozen each. Nothing per-strategy should be tuned on this much data — which
+  is exactly what `expectancy.SHRINK_K` already assumes.
+- **Conviction weights, day-character thresholds and the pillar weights are reasoned
+  rather than fitted.** The measurements feeding them are real — every zone quality,
+  sweep depth and structure displacement is computed from live candles — but the
+  coefficients that turn a measurement into a score were chosen by judgment, not
+  derived from Gold's own behaviour. They have not been walk-forward validated.
 - The outcome memory needs closed setups before it can say anything. On a fresh
   install it will correctly report that it does not know.
-- Conviction weights, day-character thresholds and session quality figures are
-  reasoned rather than fitted. They have not been walk-forward validated.
+- Swap/financing is not modelled, and since v1.8.0 does not need to be: every
+  filled trade is closed five minutes before the 17:00 New York rollover
+  (`flat_before_rollover`), and nothing fills from then until the spread settles an
+  hour later. Switch it off per profile to hold through.
 
 ---
 

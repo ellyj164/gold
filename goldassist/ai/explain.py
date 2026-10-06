@@ -101,6 +101,12 @@ def decision_narrative(decision: dict, analysis: dict) -> str:
             f"{score:.0f}/100 with Gold at {price:.2f} in a {regime} regime."
         )
 
+    # 1b. What a score like this has been worth. Said immediately after the
+    # score, so the number is never read without its record.
+    record = decision.get("score_record") or {}
+    if record.get("note"):
+        parts.append(record["note"])
+
     # 2. Timeframe picture.
     alignment = analysis.get("alignment", {})
     reads = alignment.get("reads", {})

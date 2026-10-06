@@ -363,6 +363,7 @@
             <button class="filter" data-outcome="win">Won</button>
             <button class="filter" data-outcome="loss">Lost</button>
             <button class="filter" data-outcome="untaken">Never filled</button>
+            <button class="filter" data-outcome="unresolved">Unresolved</button>
           </div>
           <div class="filters" id="firedSessionFilters"></div>
         </div>
@@ -425,8 +426,14 @@
         </div>
         <table class="table" id="signalsTable">
           <thead><tr>
-            <th>Time</th><th>Price</th><th>Decision</th><th>Dir</th><th>Score</th>
-            <th>Regime</th><th>Invalidation</th><th>R:R</th><th>Result</th>
+            <th>Time</th><th>Price</th><th>Decision</th>
+            <th title="The engine's top-level read of the market, which is not the same thing as the setup beside it">Market bias</th>
+            <th>Score</th>
+            <th>Setup</th>
+            <th title="The setup's own direction. A book that watches both sides can track a bullish setup under a bearish market bias — that is the design, not a contradiction">Setup dir</th>
+            <th>Regime</th>
+            <th title="The setup's own invalidation, measured from its entry zone">Setup stop</th>
+            <th title="The setup's own reward-to-risk">R:R</th><th>Result</th>
           </tr></thead>
           <tbody></tbody>
         </table>

@@ -128,9 +128,34 @@ class AIConfig:
 
 
 @dataclass
+class CostConfig:
+    """What the broker takes out of a trade.
+
+    Only the parts this application cannot observe live are configured here.
+    The spread is always *measured* -- from the live bid/ask, or from the
+    ``spread`` column MetaTrader records on every historical candle -- because
+    guessing it would defeat the point. Commission and slippage cannot be
+    observed from the data feed at all, so they default to zero and are stated
+    as unmodelled rather than invented.
+
+    Set ``commission_per_lot`` on a raw-spread account (Exness Raw/Zero, IC
+    Markets Raw and similar charge a round-turn commission); leave it at zero
+    on a standard spread-only account, which is what most retail Gold is.
+    """
+
+    # Round-turn commission per 1.0 lot, in the account currency.
+    commission_per_lot: float = 0.0
+    # Expected slippage per side, in pips. Zero means "not modelled".
+    slippage_pips: float = 0.0
+    # Turning this off restores the old gross-only behaviour everywhere.
+    enabled: bool = True
+
+
+@dataclass
 class AppConfig:
     mt5: MT5Config = field(default_factory=MT5Config)
     ai: AIConfig = field(default_factory=AIConfig)
+    costs: CostConfig = field(default_factory=CostConfig)
     host: str = "127.0.0.1"
     port: int = 8765
     refresh_seconds: int = 5
@@ -145,6 +170,7 @@ class AppConfig:
             raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
             cfg.mt5 = MT5Config(**{**asdict(cfg.mt5), **raw.get("mt5", {})})
             cfg.ai = AIConfig(**{**asdict(cfg.ai), **raw.get("ai", {})})
+            cfg.costs = CostConfig(**{**asdict(cfg.costs), **raw.get("costs", {})})
             for key in ("host", "port", "refresh_seconds", "display_utc_offset"):
                 if key in raw:
                     setattr(cfg, key, raw[key])
@@ -159,6 +185,7 @@ class AppConfig:
         payload = {
             "mt5": asdict(self.mt5),
             "ai": asdict(self.ai),
+            "costs": asdict(self.costs),
             "host": self.host,
             "port": self.port,
             "refresh_seconds": self.refresh_seconds,

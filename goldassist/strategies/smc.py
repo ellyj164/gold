@@ -294,8 +294,17 @@ def _bos_rank(event: dict) -> float:
 @base.strategy("sweep_reversal", "Liquidity Sweep Reversal", SMC,
                alignment=COUNTER, min_conviction=55)
 def sweep_reversal(ctx: Context) -> list[Candidate]:
-    """Stops taken beyond a level, then the level reclaimed."""
-    out: list[Candidate] = []
+    """Stops taken beyond a level, then the level reclaimed.
+
+    Both sides are examined, because a session that raids the lows and a
+    session that raids the highs are both this pattern. What they may not do
+    is describe the *same* price: a wide, indecisive candle wicks through the
+    highs and the lows at once, and reading each wick on its own produced a
+    long and a short a couple of pips apart, fired on the same cycle, each
+    with its stop inside the other's entry. That is not two setups. It is one
+    candle read twice. ``_operative`` keeps whichever raid is still live.
+    """
+    picked: dict[str, tuple[Candidate, dict]] = {}
     sweeps = ctx.liquidity.get("sweeps") or []
     for direction in ("bullish", "bearish"):
         matching = [s for s in sweeps if s.get("direction") == direction]
@@ -335,7 +344,7 @@ def sweep_reversal(ctx: Context) -> list[Candidate]:
             (0.15, base.clamp(1.0 - ctx.distance_atr(level) / 3.0, 0.0, 1.0)),
         )
         side = "sell-side" if direction == "bullish" else "buy-side"
-        out.append(Candidate(
+        picked[direction] = (Candidate(
             key="sweep_reversal", name="Liquidity Sweep Reversal", family=SMC,
             direction=direction, trigger_family="reversal",
             label=base.label_for("Sweep Reversal", direction),
@@ -350,8 +359,40 @@ def sweep_reversal(ctx: Context) -> list[Candidate]:
                       f"reclaimed in {int(best.get('reclaimed_bars') or 0)} candle(s))",
                       "structure shifted after the sweep" if shift
                       else "waiting for the structure shift to confirm it"],
-        ))
-    return out
+        ), best)
+    return _operative(picked, ctx)
+
+
+# How close two opposite sweep zones have to be before they are treated as one
+# candle read twice rather than the two edges of a range. A raid on the lows at
+# 4590 and a raid on the highs at 4600 are a range and both are tradeable; the
+# same two readings a quarter of an ATR apart are one indecisive bar.
+SWEEP_SAME_AREA_ATR = 0.25
+
+
+def _operative(picked: dict[str, tuple[Candidate, dict]],
+               ctx: Context) -> list[Candidate]:
+    """Drop the side of a two-way raid that has already been overtaken.
+
+    When the bullish and bearish reads land on the same area only one of them
+    can still be in play, and it is the *later* raid: a sweep that has since
+    been swept the other way was resolved by the market, not by this detector.
+    Strength settles the case when both wicks belong to the same candle.
+    """
+    bull, bear = picked.get("bullish"), picked.get("bearish")
+    if bull is None or bear is None:
+        return [c for c, _ in picked.values()]
+
+    buffer = ctx.atr * SWEEP_SAME_AREA_ATR
+    (b_low, b_high), (s_low, s_high) = bull[0].zone, bear[0].zone
+    if b_high + buffer < s_low or b_low - buffer > s_high:
+        return [bull[0], bear[0]]           # two edges of a range: both stand
+
+    def rank(entry: tuple[Candidate, dict]) -> tuple[float, float]:
+        candidate, sweep = entry
+        return (float(sweep.get("time") or 0), float(sweep.get("strength") or 0))
+
+    return [max((bull, bear), key=rank)[0]]
 
 
 # --- draw on liquidity ------------------------------------------------------
@@ -363,7 +404,7 @@ def liquidity_draw(ctx: Context) -> list[Candidate]:
     """A clear run at untapped liquidity far enough to be worth taking."""
     out: list[Candidate] = []
     pools = ctx.liquidity.get("pools") or []
-    minimum = float(getattr(ctx.profile, "min_target_pips", 50.0)) * 0.10
+    minimum = float(getattr(ctx.profile, "min_target_pips", 500.0)) * 0.01
 
     for direction in ("bullish", "bearish"):
         side = "buyside" if direction == "bullish" else "sellside"
@@ -417,7 +458,7 @@ def liquidity_draw(ctx: Context) -> list[Candidate]:
             sources=[ZoneHint("pullback", "M15", low, high, 55.0,
                               "M15 shallow pullback")],
             evidence=[f"untapped {side} liquidity at {float(target['price']):.2f}, "
-                      f"{distance / 0.10:.0f} pips away",
+                      f"{distance / 0.01:.0f} pips away",
                       "no opposing level of note in between",
                       f"H1 structure is {ctx.struct('H1').get('trend', 'unclear')}"],
         ))

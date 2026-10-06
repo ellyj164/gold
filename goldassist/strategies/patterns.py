@@ -17,7 +17,7 @@ from __future__ import annotations
 from . import base
 from .base import Candidate, Context, ZoneHint, PATTERN, EITHER, COUNTER, WITH_TREND
 
-PIP = 0.10
+PIP = 0.01
 
 # Candles that count as a genuine rejection rather than noise.
 REJECTION_PATTERNS = {
@@ -150,7 +150,7 @@ def double_extreme(ctx: Context) -> list[Candidate]:
                 continue
             neckline = float(min(between, key=lambda s: abs(float(s["price"]) - level))["price"])
             height = abs(level - neckline)
-            if height < 30 * PIP:
+            if height < 300 * PIP:
                 continue      # too shallow to pay for the risk
 
             low, high = base.band(level, tolerance)

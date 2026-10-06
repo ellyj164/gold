@@ -14,3 +14,9 @@ python-multipart>=0.0.9  # chart-screenshot uploads
 
 anthropic>=0.40          # Claude analyst layer (optional at runtime)
 pywebview>=5.0           # native desktop window (falls back to the browser)
+
+# Declared explicitly, not inherited. ai/providers.py speaks raw HTTP to every
+# provider and imports httpx directly. It used to arrive transitively via the
+# anthropic SDK; anthropic 1.x moved to httpx2, so relying on that broke the
+# AI layer on any fresh install.
+httpx>=0.27

@@ -31,13 +31,13 @@ import numpy as np
 from . import base
 from .base import Candidate, Context, ZoneHint, EITHER, RANGE, TREND, WITH_TREND
 
-PIP = 0.10
+PIP = 0.01
 
 # The floor from opportunity.py, in price. A pattern whose whole structure is
 # smaller than the trader's minimum move has no trade in it however clean it
 # looks, so each detector checks its own geometry against this before doing any
 # further work.
-MIN_MOVE = 50.0 * PIP
+MIN_MOVE = 500.0 * PIP
 
 
 # --- shared geometry --------------------------------------------------------

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
@@ -41,20 +42,26 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     # desktop app rather than silently falling back to the default.
     timeutil.configure(config.display_utc_offset)
     service = AnalysisService(config)
-    app = FastAPI(title="AI Gold Trading Decision Assistant", version="0.1.0")
-    app.state.service = service
 
-    @app.on_event("startup")
-    def _startup() -> None:
+    # Startup/shutdown as a lifespan rather than @app.on_event: Starlette 1.0
+    # removed the event-handler API outright. `service.start()` only spawns a
+    # daemon thread, so calling both hooks inline here keeps the previous
+    # semantics -- Starlette ran sync on_event handlers on the loop too.
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
         try:
             service.start()
         except Exception as exc:  # surfaced in the UI rather than crashing the app
             log.exception("Startup failed")
             service.status["error"] = str(exc)
+        try:
+            yield
+        finally:
+            service.stop()
 
-    @app.on_event("shutdown")
-    def _shutdown() -> None:
-        service.stop()
+    app = FastAPI(title="AI Gold Trading Decision Assistant", version="0.1.0",
+                  lifespan=lifespan)
+    app.state.service = service
 
     # -- pages -------------------------------------------------------------
 
@@ -137,12 +144,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         from .. import strategies as strategy_library_module
 
         enabled = getattr(service.profile, "enabled_strategies", None)
+        disabled = set(getattr(service.profile, "disabled_strategies", ()) or ())
         registry = strategy_library_module.describe_all()
         stats = {row["strategy"]: row for row in service.db.strategy_stats()}
         live: dict[str, int] = service.book.counts().get("by_strategy", {})
 
         for entry in registry:
-            entry["enabled"] = enabled is None or entry["key"] in enabled
+            entry["enabled"] = ((enabled is None or entry["key"] in enabled)
+                                and entry["key"] not in disabled)
             entry["live"] = live.get(entry["key"], 0)
             entry["record"] = stats.get(entry["key"])
         return safe({
@@ -423,6 +432,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         service.db.mark_alerts_seen()
         return {"ok": True}
 
+    @app.get("/api/health")
+    def health() -> dict:
+        """Whether every dependency is actually working, checked not assumed."""
+        return safe(service.health())
+
     # -- backtesting -------------------------------------------------------
 
     @app.get("/api/backtests")
@@ -445,9 +459,17 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         timeframe = body.get("timeframe", "M15")
 
         # Run off the event loop: a replay takes minutes, not milliseconds.
+        #
+        # Sequential on purpose. The parallel runner forks worker processes,
+        # and this path runs inside the live application while it holds the
+        # MetaTrader connection -- MT5 serves one client at a time. The command
+        # line (`python -m goldassist.backtest`) is where a deep parallel
+        # replay belongs, with the terminal to itself.
         def _run():
             frames = service.feed.frames()
-            return backtest_engine.run(frames, prof, step_timeframe=timeframe, step=step)
+            return backtest_engine.run(
+                frames, prof, step_timeframe=timeframe, step=step,
+                costs=service.costs)
 
         try:
             result = await asyncio.to_thread(_run)

@@ -95,7 +95,7 @@ def invalidation_for_zone(analysis: dict, direction: str, zone_low: float,
 
 def targets_for_zone(analysis: dict, direction: str, entry: float,
                      invalidation: float, count: int = 3,
-                     minimum_pips: float = 50.0,
+                     minimum_pips: float = 500.0,
                      extra: list[dict] | None = None) -> list[dict]:
     """Up to ``count`` objectives ahead of the entry, nearest first.
 
@@ -163,7 +163,7 @@ def targets_for_zone(analysis: dict, direction: str, entry: float,
     # Nothing structural clears the pip floor. Before giving up on the setup,
     # test whether the move is simply *open* -- no level of consequence stands
     # in front of it within the required distance. An unobstructed run is a
-    # real objective and is how most 50-pip days on Gold actually pay; it is
+    # real objective and is how most 500-pip days on Gold actually pay; it is
     # labelled as a projection so nobody mistakes it for a measured level.
     if not found:
         projected = _projection(analysis, direction, entry, atr, minimum_distance)

@@ -47,13 +47,29 @@ class MT5Source:
         self._mt5 = None
         self._lock = threading.RLock()
         self._connected = False
+        # Set once the application is closing. ``mt5.initialize`` starts the
+        # terminal when it is not running, so any connect attempt after this
+        # point would reopen MT5 behind a window the trader has already closed.
+        self._closed = False
+        # Terminal processes that appeared during our own initialize calls,
+        # i.e. the ones this application opened and should close again.
+        self.launched_pids: set[int] = set()
 
     # -- connection ---------------------------------------------------------
+
+    def close_for_good(self) -> None:
+        """Disconnect and refuse every later connect, including reconnects."""
+        # Set outside the lock: a reconnect can hold it for seconds inside
+        # initialize, and the flag must take effect for the next attempt anyway.
+        self._closed = True
+        self.shutdown()
 
     def connect(self) -> None:
         with self._lock:
             if self._connected:
                 return
+            if self._closed:
+                raise DataUnavailable("The application is closing.")
             try:
                 import MetaTrader5 as mt5  # imported lazily: Windows-only package
             except ImportError as exc:  # pragma: no cover - environment dependent
@@ -71,7 +87,12 @@ class MT5Source:
                     password=self.config.password or "",
                     server=self.config.server or "",
                 )
-            if not mt5.initialize(**kwargs):
+            from . import terminal
+
+            before = terminal.running()
+            initialized = mt5.initialize(**kwargs)
+            self.launched_pids |= terminal.running() - before
+            if not initialized:
                 code, msg = mt5.last_error()
                 raise DataUnavailable(
                     f"Could not connect to the MetaTrader 5 terminal ({code}: {msg}). "

@@ -1629,7 +1629,12 @@ ${firedAt}`,
         ? `${fmt(r.entry_low)}–${fmt(r.entry_high)}` : "—";
       const result = open
         ? `<span class="pill running">running</span>`
-        : r.outcome === "untaken" || !r.filled_at
+        : r.outcome === "unresolved"
+          // A real trade the application never saw close, because it was shut
+          // down while the trade was running. Not a win, not a loss, and above
+          // all not "never filled" -- it filled, and the result is unknown.
+          ? `<span class="pill muted" title="Filled, but the application was closed before this trade resolved">unresolved</span>`
+          : r.outcome === "untaken" || !r.filled_at
           ? `<span class="pill muted">never filled</span>`
           : `<span class="pill ${r.outcome === "win" ? "win" : "loss"}">`
             + `${(r.result_pips ?? 0) >= 0 ? "+" : ""}${Math.round(r.result_pips ?? 0)}p`
@@ -1754,6 +1759,7 @@ ${firedAt}`,
     stop: "stop hit",
     breakeven: "closed at breakeven",
     expiry: "time exit",
+    rollover: "flat before rollover",
     cancelled: "premise gone",
     structure: "invalidated before entry",
   };
@@ -1817,18 +1823,50 @@ ${firedAt}`,
   async function loadSignals() {
     const query = state.signalFilter ? `?decision=${state.signalFilter}` : "";
     const data = await api("/api/signals" + query);
-    $("signalsTable").querySelector("tbody").innerHTML = data.signals.map((s) => `
+    /*
+     * A row here carries two different reads, and they do not have to agree.
+     *
+     * `direction` is the engine's top-level market bias; `setup_direction` is
+     * the direction of whichever setup was on the board at that moment. The
+     * book deliberately watches both sides, so a bullish sweep reversal under
+     * a bearish market bias is the design working, not the system
+     * contradicting itself.
+     *
+     * It read as a contradiction because the two were rendered in adjacent
+     * unlabelled columns — "DIR bearish | SETUP Bullish Sweep Reversal" — and
+     * the invalidation shown was the *decision's*, which for a bullish setup
+     * sat above its own entry zone and could not be a stop at all. Each figure
+     * now appears under a heading that says what it describes, and the setup
+     * columns use the setup's own numbers.
+     */
+    const setupStop = (s) =>
+      s.setup_invalidation !== undefined && s.setup_invalidation !== null
+        ? s.setup_invalidation : null;
+    const setupRr = (s) =>
+      s.setup_reward_risk !== undefined && s.setup_reward_risk !== null
+        ? s.setup_reward_risk : null;
+
+    $("signalsTable").querySelector("tbody").innerHTML = data.signals.map((s) => {
+      const stop = setupStop(s);
+      const rr = setupRr(s);
+      const dir = s.setup_direction || "";
+      return `
       <tr>
         <td class="muted" title="${escapeHtml(fmtFull(s.created_at))}">${fmtStamp(s.created_at)}</td>
         <td>${fmt(s.price)}</td>
         <td class="${s.decision.toLowerCase()}">${s.decision}</td>
-        <td class="${biasClass(s.direction)}">${s.direction}</td>
+        <td class="${biasClass(s.direction)}" title="The engine's overall read of the market">${s.direction}</td>
         <td>${fmt(s.score, 0)}</td>
+        <td class="${biasClass(dir)}">${escapeHtml(s.setup_label || "—")}</td>
+        <td class="${biasClass(dir)}" title="${dir && s.direction && dir !== s.direction
+            ? "This setup trades against the overall market bias — a counter-bias idea, tracked deliberately"
+            : "This setup agrees with the overall market bias"}">${escapeHtml(dir || "—")}</td>
         <td class="muted">${escapeHtml(s.regime || "")}</td>
-        <td>${s.invalidation ? fmt(s.invalidation) : "—"}</td>
-        <td>${s.reward_risk ? fmt(s.reward_risk) : "—"}</td>
+        <td title="${escapeHtml(s.setup_invalidation_note || "")}">${stop !== null ? fmt(stop) : "—"}</td>
+        <td>${rr !== null ? fmt(rr) : "—"}</td>
         <td class="muted">${escapeHtml(s.result || "")}</td>
-      </tr>`).join("") || `<tr><td colspan="9" class="muted">No signals recorded yet.</td></tr>`;
+      </tr>`;
+    }).join("") || `<tr><td colspan="11" class="muted">No signals recorded yet.</td></tr>`;
   }
 
   // -------------------------------------------------------------- journal

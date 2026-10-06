@@ -23,13 +23,17 @@ run separately, because it reads a live tape rather than closed history.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
-from ..config import TIMEFRAMES
-from . import (arrays, candlesticks, events, fvg, indicators, levels, liquidity,
-               orderblocks, regime, structure, volumeprofile, zones)
+from ..config import TIMEFRAME_MINUTES, TIMEFRAMES
+from . import (arrays, auction, candlesticks, events, fvg, indicators, levels,
+               liquidity, orderblocks, persistence, regime, structure, vwap,
+               volumeprofile, zones)
+
+log = logging.getLogger(__name__)
 
 TIMEFRAME_ROLE = {
     "D1": "macro context",
@@ -213,6 +217,11 @@ def analyse(frames: dict[str, pd.DataFrame], tick: dict | None = None) -> dict:
     )
     reg = regime.consensus({tf: d["regime"] for tf, d in per_tf.items()})
 
+    # The clock these three read from is the newest closed candle, not the wall
+    # clock. That is what keeps them correct in a replay, where "now" is a
+    # moment in history and the machine's own clock is meaningless.
+    now = max((df.index[-1] for df in frames.values() if len(df)), default=None)
+
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "price": round(price, 3),
@@ -223,9 +232,54 @@ def analyse(frames: dict[str, pd.DataFrame], tick: dict | None = None) -> dict:
         "liquidity": liq,
         "regime": reg,
         "alignment": alignment(per_tf),
+        # Where the day's business has been done, what the session is shaped
+        # like, and whether moves are currently persisting or reverting. All
+        # three are cross-timeframe reads, so they sit here rather than inside
+        # `analyse_timeframe`.
+        "vwap": _safe(vwap.analyse, "vwap", frames, now),
+        "auction": _safe(auction.analyse, "auction", frames, now),
+        "persistence": _safe(persistence.analyse, "persistence", frames),
         # Consumed by the risk module; empty when no calendar has been supplied.
-        "events": events.upcoming(),
+        # Read on the analysis clock, so a replay sees the releases of the day
+        # it is replaying rather than the day it is being run.
+        "events": events.upcoming(now=_close_time(frames)),
     }
+
+
+def _close_time(frames: dict[str, pd.DataFrame]) -> datetime | None:
+    """When the newest closed candle closed -- the analysis clock.
+
+    ``now`` above is the newest candle's *open*, the label MetaTrader gives it.
+    For VWAP and the auction that is the right key; for "how many minutes until
+    CPI" it is up to a candle early, so the duration is added back.
+    """
+    latest = None
+    for tf, df in frames.items():
+        if not len(df):
+            continue
+        closed = df.index[-1] + timedelta(minutes=TIMEFRAME_MINUTES.get(tf, 0))
+        latest = closed if latest is None or closed > latest else latest
+    if latest is None:
+        return None
+    moment = latest.to_pydatetime() if hasattr(latest, "to_pydatetime") else latest
+    # The calendar is UTC-aware; a naive index (a test fixture, a restored
+    # frame) would make every comparison raise and take the analysis with it.
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _safe(func, name: str, *args) -> dict:
+    """Run a context engine, degrading to an unavailable reading on failure.
+
+    These three describe the market rather than decide anything about it, and
+    the application ran without them until recently. An exception in one is
+    therefore worth a log line and a missing panel -- never a lost analysis
+    cycle, which on a live terminal means stops going unresolved.
+    """
+    try:
+        return func(*args)
+    except Exception:
+        log.warning("%s analysis failed; continuing without it", name, exc_info=True)
+        return {"available": False, "note": f"The {name} read failed this cycle."}
 
 
 def alignment(per_tf: dict[str, dict]) -> dict:

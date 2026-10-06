@@ -43,6 +43,15 @@ CREATE TABLE IF NOT EXISTS signals (
     ai_explanation  TEXT,
     setup_type      TEXT,                   -- pullback | breakout | reversal | ...
     setup_label     TEXT,
+    -- The direction of the *setup*, which is not always the direction of the
+    -- decision. ``direction`` above is the confluence engine's dominant read;
+    -- the columns from here down describe whichever setup the book was leading
+    -- with, and the two are free to disagree -- the engine can lean bullish
+    -- while the setup on the board is a bearish sweep reversal. Recording only
+    -- the decision's direction next to the setup's label produced rows reading
+    -- "bullish / Bearish Sweep Reversal", which is not a contradiction in the
+    -- analysis, only in the bookkeeping.
+    setup_direction TEXT,
     status          TEXT,                   -- lifecycle state at the time of record
     quality         TEXT,                   -- No Setup | Weak | ... | Very Strong
     entry_low       REAL,
@@ -137,7 +146,8 @@ CREATE TABLE IF NOT EXISTS setup_outcomes (
     targets_hit     INTEGER,
     mfe_pips        REAL,
     mae_pips        REAL,
-    opportunity_pips REAL
+    opportunity_pips REAL,
+    confirmations_at_fill INTEGER            -- agreeing strategies when it filled
 );
 CREATE INDEX IF NOT EXISTS idx_outcomes_closed ON setup_outcomes(closed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_outcomes_setup ON setup_outcomes(setup_type);
@@ -208,7 +218,12 @@ CREATE TABLE IF NOT EXISTS fired_signals (
     exit_price      REAL,
     exit_reason     TEXT,
     result_pips     REAL,
-    r_multiple      REAL
+    r_multiple      REAL,
+    -- The whole setup, as ``Suggestion.persist`` wrote it. The flat columns
+    -- above are what the signal-log tab reads; this is what the setup book
+    -- reloads on startup so a setup that was live when the application closed
+    -- carries on being tracked instead of being stranded here forever.
+    card            TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_fired_at ON fired_signals(fired_at DESC);
 CREATE INDEX IF NOT EXISTS idx_fired_date ON fired_signals(fired_date);
@@ -247,6 +262,7 @@ class Database:
             "quality": "TEXT", "entry_low": "REAL", "entry_high": "REAL",
             "entry_preferred": "REAL", "entry_rationale": "TEXT",
             "trigger_text": "TEXT", "trigger_met": "INTEGER", "suggestion": "TEXT",
+            "setup_direction": "TEXT",
         }
         for column, kind in additions.items():
             if column not in existing:
@@ -262,15 +278,40 @@ class Database:
             "fill_price": "REAL", "filled_at": "TEXT", "exit_price": "REAL",
             "exit_reason": "TEXT", "result_pips": "REAL", "targets_hit": "INTEGER",
             "mfe_pips": "REAL", "mae_pips": "REAL", "opportunity_pips": "REAL",
+            "confirmations_at_fill": "INTEGER",
         }
         for column, kind in outcome_additions.items():
             if column not in existing:
                 conn.execute(f"ALTER TABLE setup_outcomes ADD COLUMN {column} {kind}")
+
+        # ``closed_at`` used to be the moment the row was written, so a filled
+        # trade resolved after a restart was dated the next morning. The signal
+        # log has always held the real exit time; copy it across for filled
+        # trades. Touches only rows that still differ, so it is a no-op once
+        # the old rows are corrected.
+        conn.execute(
+            """
+            UPDATE setup_outcomes
+               SET closed_at = (SELECT f.closed_at FROM fired_signals f
+                                 WHERE f.uid = setup_outcomes.signal_uid
+                                   AND f.closed_at IS NOT NULL LIMIT 1)
+             WHERE entered = 1
+               AND EXISTS (SELECT 1 FROM fired_signals f
+                            WHERE f.uid = setup_outcomes.signal_uid
+                              AND f.closed_at IS NOT NULL
+                              AND f.closed_at <> setup_outcomes.closed_at)""")
         # Created here rather than in SCHEMA: on a database that predates the
         # column, the schema script runs before this migration and the index
         # would refer to a column that does not exist yet.
         conn.execute("CREATE INDEX IF NOT EXISTS idx_outcomes_strategy "
                      "ON setup_outcomes(strategy)")
+
+        # The resumable card. Rows written before it existed keep a NULL here
+        # and simply cannot be resumed -- they are reconciled instead, by
+        # ``close_stranded_signals``.
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(fired_signals)")}
+        if "card" not in existing:
+            conn.execute("ALTER TABLE fired_signals ADD COLUMN card TEXT")
 
     def _conn(self) -> sqlite3.Connection:
         # One connection per thread: the API server and the analysis loop run
@@ -330,10 +371,10 @@ class Database:
                     regime, profile, timeframe_reads, evidence, penalties, waiting_for,
                     invalidation, invalidation_note, targets, reward_risk,
                     ai_explanation, result, snapshot,
-                    setup_type, setup_label, status, quality,
+                    setup_type, setup_label, setup_direction, status, quality,
                     entry_low, entry_high, entry_preferred, entry_rationale,
                     trigger_text, trigger_met, suggestion
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     _now(),
                     decision["price"],
@@ -356,6 +397,7 @@ class Database:
                     _j(decision),
                     card.get("setup_type"),
                     card.get("setup_label"),
+                    card.get("direction"),
                     card.get("status"),
                     card.get("quality"),
                     zone.get("low"),
@@ -379,7 +421,7 @@ class Database:
         params.append(limit)
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
-        return [_row(r) for r in rows]
+        return [_setup_fields(_row(r)) for r in rows]
 
     def signal(self, signal_id: int) -> dict | None:
         with self.connect() as conn:
@@ -415,12 +457,16 @@ class Database:
         "reasons", "confirmations", "last_status",
     )
 
-    def record_fired_signal(self, suggestion: dict) -> int | None:
+    def record_fired_signal(self, suggestion: dict, card: dict | None = None) -> int | None:
         """Log a signal at the moment it is identified.
 
         Idempotent on ``uid``: the book can re-offer the same tracked setup
         across cycles, and a log that grew a row each time would be a log of
         polling rather than of trading.
+
+        ``card`` is the resumable form from ``Suggestion.persist``. It defaults
+        to the view model so a caller that has only that still writes something
+        readable, but only a real card can be restored into the book.
         """
         uid = suggestion.get("id")
         if not uid:
@@ -430,19 +476,21 @@ class Database:
                 "SELECT id FROM fired_signals WHERE uid = ?", (uid,)).fetchone()
             if existing:
                 return int(existing["id"])
+            columns = self.FIRED_COLUMNS + ("card",)
             values = [_fired_value(suggestion, c) for c in self.FIRED_COLUMNS]
-            placeholders = ",".join("?" * len(self.FIRED_COLUMNS))
+            values.append(_j(card if card is not None else suggestion))
+            placeholders = ",".join("?" * len(columns))
             cur = conn.execute(
-                f"INSERT INTO fired_signals ({','.join(self.FIRED_COLUMNS)}) "
+                f"INSERT INTO fired_signals ({','.join(columns)}) "
                 f"VALUES ({placeholders})", values)
             return int(cur.lastrowid)
 
-    def update_fired_signal(self, suggestion: dict) -> None:
+    def update_fired_signal(self, suggestion: dict, card: dict | None = None) -> None:
         """Carry a signal's progress onto its existing log row.
 
         Called as a setup arms, fills and finally resolves, so one row tells
         the whole story: fired at 14:37 in the overlap, filled at 14:52,
-        stopped at 15:20 for -31 pips.
+        stopped at 15:20 for -310 pips.
         """
         uid = suggestion.get("id")
         if not uid:
@@ -460,11 +508,91 @@ class Database:
             "exit_reason": suggestion.get("exit_reason"),
             "result_pips": suggestion.get("result_pips"),
             "r_multiple": suggestion.get("r_multiple"),
+            # Refreshed on every progress update, not just written once. A card
+            # frozen at identification would restore a filled, half-managed
+            # trade as though it had never armed.
+            "card": _j(card if card is not None else suggestion),
         }
         assignments = ",".join(f"{k} = ?" for k in fields)
         with self.connect() as conn:
             conn.execute(f"UPDATE fired_signals SET {assignments} WHERE uid = ?",
                          list(fields.values()) + [uid])
+
+    def open_fired_signals(self, limit: int = 40) -> list[dict]:
+        """The resumable cards of setups that were still live, newest first.
+
+        A setup only comes back if it was written with a card and has not been
+        closed. Everything else is the business of ``close_stranded_signals``.
+        """
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT card FROM fired_signals "
+                "WHERE closed_at IS NULL AND outcome IS NULL AND card IS NOT NULL "
+                "ORDER BY fired_at DESC LIMIT ?", (limit,)).fetchall()
+        cards = []
+        for row in rows:
+            try:
+                card = json.loads(row["card"])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(card, dict) and card.get("id"):
+                cards.append(card)
+        return cards
+
+    def close_stranded_signals(self, keep: set[str] | None = None,
+                               note: str = "") -> int:
+        """Close log rows for setups nothing is tracking any more.
+
+        These are the setups that were on the board when the application was
+        last closed. Nothing resolved them because the book lives in memory and
+        starts empty, so they sat in the log as permanently open -- 57% of
+        every signal ever logged, on the database this was written against.
+
+        They close in two different ways, and the difference is the whole point
+        of the method:
+
+        A setup that **never filled** is ``untaken``. That is exactly what
+        ``resolve.check_expiry`` would have written had the application stayed
+        open -- the idea ran out of time and never became a trade.
+
+        A setup that **had filled** is ``unresolved``. It was a real trade and
+        its result is genuinely unknown: nobody watched it close. Calling that
+        ``untaken`` would deny a trade happened, and calling it a win or a loss
+        would invent a number. Neither is a thing a trading record may do.
+
+        No ``setup_outcomes`` row is created either way. The learning layer
+        counts only setups that filled *and* closed under observation, and
+        manufacturing outcomes for trades nobody saw is how a record stops
+        meaning anything.
+        """
+        keep = keep or set()
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT uid, filled_at FROM fired_signals "
+                "WHERE closed_at IS NULL AND outcome IS NULL").fetchall()
+            stranded = [r for r in rows if r["uid"] not in keep]
+            if not stranded:
+                return 0
+            stamp = _now()
+            local = _local_stamp(stamp)
+            untaken = [(stamp, local, u["uid"]) for u in stranded if not u["filled_at"]]
+            unresolved = [(stamp, local, u["uid"]) for u in stranded if u["filled_at"]]
+            if untaken:
+                conn.executemany(
+                    "UPDATE fired_signals SET closed_at = ?, closed_local = ?, "
+                    "outcome = 'untaken', exit_reason = 'expiry', "
+                    "last_status = 'EXPIRED', result_pips = 0.0, r_multiple = 0.0 "
+                    "WHERE uid = ?", untaken)
+            if unresolved:
+                # Deliberately leaves result_pips and r_multiple alone: whatever
+                # the resolver had measured before the shutdown is the last true
+                # thing known about the trade, and zeroing it would replace a
+                # partial fact with a false one.
+                conn.executemany(
+                    "UPDATE fired_signals SET closed_at = ?, closed_local = ?, "
+                    "outcome = 'unresolved', exit_reason = 'abandoned', "
+                    "last_status = 'UNRESOLVED' WHERE uid = ?", unresolved)
+            return len(stranded)
 
     def fired_signals(self, limit: int = 300, date: str | None = None,
                       session: str | None = None, strategy: str | None = None,
@@ -629,6 +757,7 @@ class Database:
             "conviction", "context_score", "confirmations", "fill_price",
             "filled_at", "exit_price", "exit_reason", "result_pips",
             "targets_hit", "mfe_pips", "mae_pips", "opportunity_pips",
+            "confirmations_at_fill",
         )
         record = dict(record)
         if not isinstance(record.get("confirmations"), (str, type(None))):
@@ -783,6 +912,53 @@ class Database:
 
 
 # --- helpers ---------------------------------------------------------------
+
+
+def _setup_fields(row: dict) -> dict:
+    """Give a decision-history row the *setup's* own stop, R:R and direction.
+
+    A row in this table carries two different things: the engine's top-level
+    verdict for the market, and whichever setup happened to be on the board at
+    that moment. They are not the same read and they do not have to agree -- a
+    bearish overall bias can coexist with a tracked bullish sweep reversal,
+    which is the whole point of a book that watches both sides.
+
+    Stored, though, only the *decision's* direction, invalidation and
+    reward/risk were columns, so the history put a decision-level stop and a
+    decision-level direction on the same row as a setup label. Rendered side by
+    side that produced rows reading "DIR bearish | SETUP Bullish Sweep
+    Reversal | INVALIDATION 4438.51" -- a bullish setup labelled bearish, with
+    a stop fourteen dollars above its own entry zone. Nothing was wrong in the
+    engine; the row simply could not be read, and a row that cannot be read is
+    indistinguishable from a system contradicting itself.
+
+    The full setup card was already being stored in ``suggestion``, so the
+    setup's own figures are recoverable rather than lost. They are surfaced
+    here under explicit ``setup_`` names, leaving the decision-level columns
+    exactly as they were, so the interface can show each beside its own label.
+    """
+    card = row.get("suggestion")
+    if not isinstance(card, dict):
+        return row
+
+    row.setdefault("setup_direction", card.get("direction"))
+    if not row.get("setup_direction"):
+        row["setup_direction"] = card.get("direction")
+
+    invalidation = card.get("invalidation") or {}
+    if isinstance(invalidation, dict) and invalidation.get("price") is not None:
+        row["setup_invalidation"] = invalidation.get("price")
+        row["setup_invalidation_note"] = invalidation.get("description") or \
+            invalidation.get("basis")
+    if card.get("reward_risk") is not None:
+        row["setup_reward_risk"] = card.get("reward_risk")
+
+    targets = card.get("targets") or []
+    if targets and isinstance(targets[0], dict):
+        row["setup_tp1"] = targets[0].get("price")
+    row["setup_score"] = card.get("score")
+    row["setup_strategy"] = card.get("strategy_name") or card.get("strategy")
+    return row
 
 # Columns holding JSON documents, decoded on the way out so callers never see
 # raw strings.

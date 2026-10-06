@@ -9,7 +9,12 @@
 
 #define AppName        "Gold Decision Assistant"
 #define AppShortName   "GoldAssistant"
-#define AppVersion     "1.3.1"
+; Supplied by build.bat as /DAppVersion=<version>, read from
+; goldassist/__init__.py. The fallback below is only for building this
+; script by hand, and is the one copy that may go stale.
+#ifndef AppVersion
+  #define AppVersion   "1.4.0"
+#endif
 #define AppPublisher   "Joseph"
 #define AppExeName     "GoldAssistant.exe"
 

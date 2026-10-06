@@ -113,7 +113,7 @@ def _resolve(analysis, profile, best, other, risk_view):
     # 7. The move must be big enough to be worth an intraday trade at all.
     #    Having the distance available does not make a signal -- but not having
     #    it definitely prevents one.
-    minimum_pips = getattr(profile, "min_target_pips", 50.0)
+    minimum_pips = getattr(profile, "min_target_pips", 500.0)
     targets = risk_view.get("targets") or []
     if targets and minimum_pips:
         first_pips = targets[0].get("pips")

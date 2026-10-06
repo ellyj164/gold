@@ -15,7 +15,7 @@ import logging
 
 import pandas as pd
 
-from ..config import BACKTEST_TIMEFRAMES
+from ..config import APP_DIR, BACKTEST_TIMEFRAMES
 from ..data.source import DataUnavailable, MarketDataSource
 
 log = logging.getLogger(__name__)
@@ -72,6 +72,59 @@ def load(source: MarketDataSource, bars: dict[str, int] | None = None) -> dict[s
               "terminal downloads the data, then retry."
         )
     return frames
+
+
+CACHE_PATH = APP_DIR / "backtest-history.pkl"
+
+
+def save_cache(frames: dict[str, pd.DataFrame], path=None) -> object:
+    """Write a loaded history to disk so the next replay need not re-download it.
+
+    Pulling 138,000 candles out of MetaTrader takes a minute and, more
+    awkwardly, holds the terminal: MT5 serves one client at a time, so a replay
+    that owns the connection blocks the live application and every other
+    replay. Caching the frames decouples the two -- the download happens once
+    and any number of replays run from the file, with the terminal free.
+
+    Pickle rather than CSV or Parquet: the frames are timezone-aware
+    DatetimeIndex-ed float frames, this is a local scratch file with a lifetime
+    of days, and a round trip that silently changes a dtype or drops a timezone
+    would corrupt the causality tests that depend on both.
+    """
+    target = path or CACHE_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    pd.to_pickle(frames, target)
+    return target
+
+
+def load_cache(path=None) -> dict[str, pd.DataFrame] | None:
+    """Read a cached history, or None when there is not a usable one."""
+    source = path or CACHE_PATH
+    if not source.exists():
+        return None
+    try:
+        frames = pd.read_pickle(source)
+    except Exception as exc:  # pragma: no cover - corrupt file is recoverable
+        log.warning("Ignoring unreadable history cache at %s: %s", source, exc)
+        return None
+    if not isinstance(frames, dict) or not frames:
+        return None
+    missing = [tf for tf in BACKTEST_TIMEFRAMES if tf not in frames]
+    if missing:
+        log.warning("History cache is missing %s; ignoring it", ", ".join(missing))
+        return None
+    return frames
+
+
+def describe_cache(path=None) -> str:
+    """A one-line description of what the cache holds, for the CLI."""
+    source = path or CACHE_PATH
+    frames = load_cache(source)
+    if frames is None:
+        return f"no history cache at {source}"
+    ends = [df.index[-1] for df in frames.values()]
+    return (f"{sum(len(df) for df in frames.values()):,} candles to "
+            f"{min(ends):%Y-%m-%d %H:%M} ({source})")
 
 
 def usable_window(frames: dict[str, pd.DataFrame]) -> tuple[pd.Timestamp, pd.Timestamp]:
