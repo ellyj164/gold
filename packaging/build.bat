@@ -46,7 +46,7 @@ echo.
 echo [2/5] Running the test suites...
 REM Never package a build that cannot pass its own behaviour tests. Each suite
 REM pins behaviour that has been broken by accident before.
-for %%T in (test_engines test_signals test_trader test_resolution test_timeline test_analysis_v12 test_ai_settings test_costs) do (
+for %%T in (test_engines test_signals test_trader test_resolution test_timeline test_analysis_v12 test_ai_settings test_ai_chain test_news test_costs) do (
     ".venv\Scripts\python.exe" -m tests.%%T >nul
     if errorlevel 1 (
         echo ERROR: tests.%%T failed. Run it directly to see which check broke:

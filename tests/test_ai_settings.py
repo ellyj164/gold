@@ -48,6 +48,11 @@ def isolate() -> Path:
     return path
 
 
+def entry(described: dict, provider: str) -> dict:
+    """One provider's row of describe(), by name rather than position."""
+    return next(p for p in described["providers"] if p["provider"] == provider)
+
+
 # --- key handling ----------------------------------------------------------
 
 def test_keys_never_escape():
@@ -59,12 +64,11 @@ def test_keys_never_escape():
     described = credentials.describe()
 
     blob = json.dumps(described)
+    claude = entry(described, "anthropic")
     check("describe() never contains the key", SECRET not in blob)
-    check("describe() reports that a key is set",
-          described["providers"][0]["has_key"])
+    check("describe() reports that a key is set", claude["has_key"])
     check("the hint is a mask, not the key",
-          SECRET not in described["providers"][0]["key_hint"]
-          and "···" in described["providers"][0]["key_hint"])
+          SECRET not in claude["key_hint"] and "···" in claude["key_hint"])
     check("the key is readable back for actual use",
           credentials.get_key("anthropic") == SECRET)
     check("the store file is named in the settings", described["store_path"])
@@ -77,7 +81,7 @@ def test_keys_never_escape():
 
     credentials.set_key("anthropic", "")
     check("clearing a key removes it",
-          not credentials.describe()["providers"][0]["has_key"])
+          not entry(credentials.describe(), "anthropic")["has_key"])
     check("a cleared key is gone from disk",
           SECRET not in store.read_text(encoding="utf-8"))
 
@@ -86,7 +90,8 @@ def test_mode_and_provider():
     print("credentials: mode and provider")
     isolate()
     check("the default mode is offline", credentials.get_mode() == "offline")
-    check("the default provider is Claude", credentials.get_provider() == "anthropic")
+    # NVIDIA since v1.10.0: the free chain is what a new install should reach for.
+    check("the default provider is NVIDIA", credentials.get_provider() == "nvidia")
 
     credentials.set_mode("online")
     credentials.set_provider("gemini")

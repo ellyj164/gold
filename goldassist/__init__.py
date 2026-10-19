@@ -3,4 +3,4 @@
 Decision-support only: this package never places, modifies, or closes trades.
 """
 
-__version__ = "1.9.0"
+__version__ = "1.11.0"

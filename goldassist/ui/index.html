@@ -48,6 +48,7 @@
   <nav class="tabs">
     <button class="tab active" data-view="terminal">Terminal</button>
     <button class="tab" data-view="analysis">Analysis</button>
+    <button class="tab" data-view="news">News <span class="tab-dot" id="newsDot" hidden></span></button>
     <button class="tab" data-view="trader">Trader</button>
     <button class="tab" data-view="signals">Signals</button>
     <button class="tab" data-view="history">Signal History</button>
@@ -113,6 +114,8 @@
               <label><input type="checkbox" data-layer="rsi"> RSI</label>
               <label><input type="checkbox" data-layer="macd"> MACD</label>
             </div>
+            <button class="btn tiny ai-read-btn" id="aiChartBtn" type="button"
+                    title="Send this chart and the engine's measurements to the AI for a top-down desk read">AI chart read</button>
           </div>
           <div class="chart-host">
             <canvas id="chart"></canvas>
@@ -232,9 +235,20 @@
               <select id="aiProvider"></select>
             </div>
             <div class="ai-row">
-              <label for="aiModel">Model</label>
+              <label for="aiModel" id="aiModelLabel">Model</label>
               <input type="text" id="aiModel" spellcheck="false" autocomplete="off">
             </div>
+            <!-- NVIDIA only: the models allowed to see a chart image, tried
+                 in order just like the text chain above. -->
+            <div class="ai-row" id="aiVisionRow" hidden>
+              <label for="aiVision">Vision models</label>
+              <input type="text" id="aiVision" spellcheck="false" autocomplete="off">
+            </div>
+            <div class="ai-hint" id="aiChainHint" hidden>
+              Comma-separated, tried left to right. A model that times out, is
+              overloaded or retired is rested and the next one answers.
+            </div>
+            <div class="ai-health" id="aiHealth" hidden></div>
             <div class="ai-row">
               <label for="aiKey">API key</label>
               <input type="password" id="aiKey" spellcheck="false" autocomplete="off"
@@ -281,6 +295,46 @@
           <p class="muted small">Upload a Gold chart image and the AI will read the visible structure, levels, and candles.</p>
           <input type="file" id="chartImageInput" accept="image/png,image/jpeg,image/webp">
           <div class="explanation" id="chartImageResult"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <!-- News: the wires, each headline tagged for its bearing on gold, and
+         this week's US releases. Context for the trader; never part of the
+         score. -->
+    <section class="view" id="view-news">
+      <div class="news-grid">
+        <div class="card news-feed">
+          <h3>Gold-moving news <span class="badge" id="newsCount">0</span>
+            <button class="btn ghost tiny" id="newsRefresh" type="button"
+                    title="Read the wires now instead of at the next 3-minute check">Refresh</button>
+          </h3>
+          <div class="news-summary" id="newsSummary"><span class="muted">Reading the wires…</span></div>
+          <div class="filters" id="newsFilters">
+            <button class="news-filter active" data-filter="important"
+                    title="High and medium impact">Important</button>
+            <button class="news-filter" data-filter="high">High impact</button>
+            <button class="news-filter" data-filter="bullish">Bullish for gold</button>
+            <button class="news-filter" data-filter="bearish">Bearish for gold</button>
+            <button class="news-filter" data-filter="all">All</button>
+          </div>
+          <ul class="news-list" id="newsList"></ul>
+        </div>
+
+        <div class="card news-calendar">
+          <h3>US releases this week</h3>
+          <div class="cal-next" id="calNext"></div>
+          <table class="table cal-table" id="calTable">
+            <thead><tr><th>When</th><th>Release</th><th>Forecast</th><th>Previous</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <p class="muted small cal-note">
+            This week from the ForexFactory feed (medium and high impact); later weeks
+            carry the verified FOMC, CPI and payroll dates. Actual figures are not in
+            the feed — check them on release. Around a high-impact release, setups
+            show a warning and lose 8 points of score, before it and for an hour after.
+          </p>
         </div>
       </div>
     </section>
@@ -373,7 +427,7 @@
             <th>Date</th><th>Fired</th><th>Session</th><th>Strategy</th>
             <th>Dir</th><th>Entry zone</th><th>Stop</th><th>TP1</th>
             <th>Pips on offer</th><th>R:R</th><th>Score</th>
-            <th>Status</th><th>Result</th>
+            <th>Status</th><th>Result</th><th></th>
           </tr></thead>
           <tbody></tbody>
         </table>
@@ -528,6 +582,25 @@
       </div>
     </section>
   </main>
+
+  <!-- One slide-in panel for every on-demand AI read: the chart read and the
+       signal audit. A drawer rather than a card so the chart keeps its size. -->
+  <aside class="ai-drawer" id="aiDrawer" hidden aria-live="polite">
+    <div class="ai-drawer-head">
+      <div>
+        <div class="ai-drawer-title" id="aiDrawerTitle">AI analyst</div>
+        <div class="ai-stamp" id="aiDrawerStamp"></div>
+      </div>
+      <button class="btn ghost tiny" id="aiDrawerClose" type="button" title="Close">✕</button>
+    </div>
+    <div class="ai-drawer-note" id="aiDrawerNote" hidden></div>
+    <div class="explanation ai-drawer-body" id="aiDrawerBody"></div>
+    <form class="chat-form" id="aiDrawerForm">
+      <input type="text" id="aiDrawerInput" autocomplete="off"
+             placeholder="Ask a follow-up about this…">
+      <button class="btn" type="submit">Ask</button>
+    </form>
+  </aside>
 
   <footer class="disclaimer">
     Decision support only — this application never places, modifies, or closes trades, and a setup

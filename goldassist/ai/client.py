@@ -12,15 +12,20 @@ keeps working offline exactly as the specification requires.
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
+import re
 from typing import Iterator
 
 from ..config import AIConfig
 from . import credentials, explain, providers
 from .prompts import (
+    CHART_INSIGHT_PROMPT,
     CHART_VISION_PROMPT,
     LEARNING_SYSTEM_PROMPT,
+    NEWS_CLASSIFY_PROMPT,
+    SIGNAL_REVIEW_PROMPT,
     SYSTEM_PROMPT,
     facts_prompt,
 )
@@ -60,7 +65,8 @@ class AIAnalyst:
         mode = credentials.get_mode()
         provider = credentials.get_provider()
         key = credentials.get_key(provider)
-        signature = (mode, provider, key, credentials.get_model(provider))
+        signature = (mode, provider, key, credentials.get_model(provider),
+                     credentials.get_vision_models(provider))
         if self._checked and signature == self._signature:
             return self._client
 
@@ -88,7 +94,8 @@ class AIAnalyst:
             self._client = providers.build(
                 provider, key,
                 model=credentials.get_model(provider),
-                max_tokens=self.config.max_tokens)
+                max_tokens=self.config.max_tokens,
+                vision_models=credentials.get_vision_models(provider))
         except providers.ProviderError as exc:
             self.last_error = str(exc)
             return None
@@ -107,7 +114,7 @@ class AIAnalyst:
         return described
 
     def apply_settings(self, *, mode=None, provider=None, keys=None,
-                       models=None) -> dict:
+                       models=None, vision_models=None) -> dict:
         """Persist settings from the panel and re-resolve the client."""
         if provider is not None:
             credentials.set_provider(provider)
@@ -115,28 +122,61 @@ class AIAnalyst:
             credentials.set_mode(mode)
         for name, value in (keys or {}).items():
             credentials.set_key(name, value)
+            if name == providers.NVIDIA and value:
+                # A new key is a fresh start: failures under the old one
+                # (a 401 above all) say nothing about this one.
+                providers.reset_health()
         for name, value in (models or {}).items():
             credentials.set_model(name, value)
+        for name, value in (vision_models or {}).items():
+            credentials.set_vision_models(name, value)
         # Force the next call to rebuild against what was just saved.
         self._checked = False
         return self.settings()
 
     def test_provider(self, provider: str, api_key: str | None = None,
-                      model: str | None = None) -> dict:
-        """Try a real call, so the panel can say whether a key works."""
+                      model: str | None = None,
+                      vision_models: str | None = None) -> dict:
+        """Try a real call, so the panel can say whether a key works.
+
+        For NVIDIA it probes every link of both chains, so the answer is not
+        just "the key works" but which models are alive today.
+        """
         key = (api_key or "").strip() or credentials.get_key(provider)
         if not key:
             return {"ok": False,
                     "message": f"No API key set for "
                                f"{providers.PROVIDER_LABELS.get(provider, provider)}."}
         try:
-            client = providers.build(provider, key,
-                                     model=model or credentials.get_model(provider),
-                                     max_tokens=64)
+            client = providers.build(
+                provider, key,
+                model=model or credentials.get_model(provider),
+                max_tokens=64,
+                vision_models=vision_models or credentials.get_vision_models(provider))
         except providers.ProviderError as exc:
             return {"ok": False, "message": str(exc)}
+
+        if isinstance(client, providers.NvidiaProvider):
+            text = client.probe(client.models)
+            vision = client.probe(client.vision_models, vision=True)
+            alive = [r for r in text if r["ok"]]
+            seeing = [r for r in vision if r["ok"]]
+            if not alive:
+                message = f"No NVIDIA text model answered. {text[0]['message'] if text else ''}"
+            else:
+                message = (f"{len(alive)} of {len(text)} text models and "
+                           f"{len(seeing)} of {len(vision)} vision models answered.")
+            return {"ok": bool(alive), "message": message.strip(),
+                    "models": {"text": text, "vision": vision}}
+
         ok, message = client.test()
         return {"ok": ok, "message": message}
+
+    def _stamp(self, client) -> dict:
+        """Which models were tried for the last answer, for the interface."""
+        attempts = getattr(client, "attempts", None) or []
+        failed = [a["model"] for a in attempts if not a.get("ok")]
+        return {"fallbacks": failed} if failed else {}
 
     # -- core call ----------------------------------------------------------
 
@@ -169,7 +209,10 @@ class AIAnalyst:
         facts = _compact_facts(decision, analysis)
         try:
             text = self._message(SYSTEM_PROMPT, facts_prompt(facts))
-            return {"text": text, "source": "claude", "model": self.config.model}
+            # "claude" is the interface's tag for "an online model wrote
+            # this"; the model field says which one actually did.
+            return {"text": text, "source": "claude",
+                    "model": getattr(self, "last_model", None) or self.config.model}
         except AIUnavailable as exc:
             if not self.config.offline_fallback:
                 raise
@@ -257,6 +300,292 @@ class AIAnalyst:
             return {"text": f"Chart analysis failed: {type(exc).__name__}",
                     "source": "error"}
 
+    def chart_insight(self, timeframe: str, decision: dict, analysis: dict,
+                      trader: dict | None = None, image_bytes: bytes | None = None,
+                      media_type: str = "image/jpeg",
+                      question: str | None = None) -> dict:
+        """A desk read of the live chart: the picture plus the measured facts.
+
+        The image is the trader's own chart as drawn on screen, so a vision
+        model sees the same structure the trader is looking at, while every
+        number still comes from the engine. When no vision model can read the
+        image -- all resting, or none configured -- the read is made from the
+        facts alone and says so, rather than failing the button.
+        """
+        facts = _compact_facts(decision, analysis)
+        facts["chart_timeframe"] = timeframe
+        facts["desk"] = desk_digest(trader)
+        ask = (f"Read the {timeframe} chart. Trader's question: {question}"
+               if question else
+               f"Give the desk read of the {timeframe} chart, top-down.")
+
+        client = self._ensure_client()
+        if client is None:
+            return {
+                "text": explain.decision_narrative(decision, analysis),
+                "source": "offline",
+                "note": (self.last_error or "Offline analysis is selected.")
+                        + " The chart read needs an online model; this is the "
+                          "engine's own narrative.",
+                "used_image": False,
+            }
+
+        client.max_tokens = 1800
+        note = None
+        if image_bytes:
+            image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+            try:
+                reply = client.complete_vision(
+                    CHART_INSIGHT_PROMPT, facts_prompt(facts, ask),
+                    image_b64, media_type)
+                self.last_error = None
+                return {"text": reply.text, "source": reply.provider,
+                        "model": reply.model, "used_image": True,
+                        **self._stamp(client)}
+            except providers.ProviderError as exc:
+                if exc.status in (401, 403):
+                    self.last_error = str(exc)
+                    return {"text": f"Chart read failed: {exc}", "source": "error"}
+                log.info("No vision model read the chart; using facts only: %s", exc)
+                note = "No vision model could read the chart image just now, so this read is from the engine's measurements only."
+            except Exception as exc:                    # pragma: no cover
+                log.warning("Chart vision call failed", exc_info=True)
+                note = f"The chart image could not be read ({type(exc).__name__}); this read is from the engine's measurements only."
+
+        try:
+            reply = client.complete(CHART_INSIGHT_PROMPT, facts_prompt(facts, ask))
+        except providers.ProviderError as exc:
+            self.last_error = str(exc)
+            return {"text": explain.decision_narrative(decision, analysis),
+                    "source": "offline", "used_image": False,
+                    "note": f"Every online model failed ({exc}). This is the engine's own narrative."}
+        self.last_error = None
+        result = {"text": reply.text, "source": reply.provider,
+                  "model": reply.model, "used_image": False, **self._stamp(client)}
+        if note:
+            result["note"] = note
+        return result
+
+    def classify_headlines(self, items: list[dict]) -> tuple[list[dict], str | None]:
+        """Model readings for a batch of headlines.
+
+        Returns ``(readings, model)``. ``readings`` holds one dict per item the
+        model tagged validly -- ``{id, bias, impact, reason}`` -- and simply
+        omits any it did not, so a half-malformed answer still lands the good
+        half. An empty list with ``model`` None means no model was reachable,
+        and the caller keeps its keyword tags.
+        """
+        if self._ensure_client() is None or not items:
+            return [], None
+        # Its own provider instance: this runs on the news thread, and the
+        # shared one has its max_tokens set per call by whatever the trader is
+        # asking at that moment. Model health stays shared (module-level).
+        provider = credentials.get_provider()
+        try:
+            client = providers.build(
+                provider, credentials.get_key(provider),
+                model=credentials.get_model(provider),
+                vision_models=credentials.get_vision_models(provider))
+        except providers.ProviderError:
+            return [], None
+        lines = []
+        for item in items:
+            summary = (item.get("summary") or "")[:220]
+            lines.append(json.dumps({"id": item["id"], "source": item.get("source_name"),
+                                     "headline": item["title"], "summary": summary},
+                                    ensure_ascii=False))
+        client.max_tokens = 60 + 70 * len(items)
+        try:
+            reply = client.complete(NEWS_CLASSIFY_PROMPT,
+                                    "Headlines, one JSON object per line:\n" + "\n".join(lines))
+        except providers.ProviderError as exc:
+            self.last_error = str(exc)
+            return [], None
+        return _parse_readings(reply.text, {i["id"] for i in items}), reply.model
+
+    def review_signal(self, signal: dict, decision: dict | None,
+                      analysis: dict | None, trader: dict | None = None,
+                      question: str | None = None,
+                      history: list[dict] | None = None) -> dict:
+        """Why a signal fired, and whether its reasons still hold now."""
+        facts = {
+            "signal": signal_digest(signal),
+            "market_now": _compact_facts(decision, analysis) if decision and analysis else None,
+            "desk": desk_digest(trader),
+        }
+        ask = (question or "Audit this signal: why it fired, and check each of "
+                           "its facts against the market now.")
+
+        client = self._ensure_client()
+        if client is None:
+            return {"text": signal_offline(signal), "source": "offline",
+                    "note": (self.last_error or "Offline analysis is selected.")
+                            + " An online model is needed to check the facts "
+                              "against the market; this is the signal's own record."}
+
+        client.max_tokens = 1600
+        try:
+            reply = client.complete(
+                SIGNAL_REVIEW_PROMPT, facts_prompt(facts, ask),
+                history=[{"role": t["role"], "content": t["content"]}
+                         for t in (history or [])[-6:]])
+        except providers.ProviderError as exc:
+            self.last_error = str(exc)
+            return {"text": signal_offline(signal), "source": "offline",
+                    "note": f"Every online model failed ({exc}). This is the signal's own record."}
+        self.last_error = None
+        return {"text": reply.text, "source": reply.provider, "model": reply.model,
+                **self._stamp(client)}
+
+
+# --- news ----------------------------------------------------------------------
+
+_ARRAY = re.compile(r"\[.*\]", re.S)
+
+
+def _parse_readings(text: str, ids: set[str]) -> list[dict]:
+    """The model's JSON array, validated item by item.
+
+    Models wrap JSON in code fences or a sentence despite being told not to,
+    so the outermost array is cut out first. Each item must name an id that
+    was actually sent and use the allowed values; anything else is dropped
+    rather than guessed at.
+    """
+    match = _ARRAY.search(text or "")
+    if not match:
+        return []
+    try:
+        data = json.loads(match.group(0))
+    except ValueError:
+        return []
+    out = []
+    for row in data if isinstance(data, list) else []:
+        if not isinstance(row, dict) or row.get("id") not in ids:
+            continue
+        bias = str(row.get("bias", "")).lower()
+        impact = str(row.get("impact", "")).lower()
+        if bias not in ("bullish", "bearish", "neutral") or impact not in ("high", "medium", "low"):
+            continue
+        out.append({"id": row["id"], "bias": bias, "impact": impact,
+                    "reason": str(row.get("reason") or "")[:160]})
+    return out
+
+
+def news_digest(news: dict | None) -> dict | None:
+    """Recent headlines as the analyst should read them: context, not signal."""
+    if not news or not news.get("items"):
+        return None
+    return {
+        "note": ("Headlines tagged for their bearing on gold by a classifier. Context "
+                 "for the read, not a signal; never treat a headline as more than it says."),
+        "balance_12h": news.get("balance"),
+        "headlines": [
+            {k: item.get(k) for k in ("published_at", "source_name", "title", "bias",
+                                      "impact", "reason")}
+            for item in news["items"][:10]
+        ],
+    }
+
+
+# --- signals -------------------------------------------------------------------
+
+def signal_digest(signal: dict) -> dict:
+    """One fired signal, as the auditing model should read it.
+
+    ``signal`` is a ``fired_signals`` row with its ``card`` parsed. The flat
+    columns carry what fired and how it ended; the card adds the reasoning the
+    strategy recorded -- rationale, the agreeing strategies' own evidence, the
+    risks it flagged, the status history -- which is exactly what "check the
+    facts" means. Feature vectors and drawing data are left out.
+    """
+    card = signal.get("card") if isinstance(signal.get("card"), dict) else {}
+
+    def pick(*keys):
+        for key in keys:
+            value = signal.get(key)
+            if value in (None, "", []):
+                value = card.get(key)
+            if value not in (None, "", []):
+                return value
+        return None
+
+    history = card.get("history") or []
+    return {
+        "strategy": pick("strategy_name", "strategy"),
+        "family": pick("family"),
+        "direction": pick("direction"),
+        "action": pick("action"),
+        "setup": pick("setup_label"),
+        "fired": pick("fired_local", "fired_at"),
+        "session": pick("session_label", "fired_session_label"),
+        "price_when_fired": pick("price"),
+        "status_now": pick("last_status", "status"),
+        "score": pick("score"),
+        "peak_score": card.get("peak_score"),
+        "conviction": pick("conviction"),
+        "context_score": pick("context_score"),
+        "quality": pick("quality"),
+        "regime": pick("regime", "regime_at_entry"),
+        "alignment": card.get("alignment"),
+        "trigger": pick("trigger_text", "trigger"),
+        "reasons": pick("reasons"),
+        "agreeing_strategies": pick("confirmations"),
+        "entry_rationale": card.get("entry_rationale"),
+        "entry_zone": card.get("entry_zone") or {
+            "low": signal.get("entry_low"), "high": signal.get("entry_high"),
+            "preferred": signal.get("entry_preferred")},
+        "stop": pick("stop", "invalidation"),
+        "targets": card.get("targets") or [signal.get(k) for k in ("tp1", "tp2", "tp3")
+                                            if signal.get(k) is not None],
+        "reward_risk": pick("reward_risk"),
+        "first_target_pips": signal.get("first_target_pips"),
+        "costs": card.get("costs"),
+        "risks_flagged": card.get("risks"),
+        "exposure": card.get("exposure_at_fill") or card.get("exposure"),
+        "status_history": [
+            {"time": h.get("time"), "status": h.get("status"),
+             "score": h.get("score"), "note": h.get("note")}
+            for h in history[-10:]] or None,
+        "result": {
+            "filled_at": pick("filled_at"),
+            "fill_price": pick("fill_price"),
+            "outcome": pick("outcome"),
+            "exit_reason": pick("exit_reason"),
+            "exit_price": pick("exit_price"),
+            "r_multiple": pick("r_multiple"),
+            "result_pips": pick("result_pips"),
+            "mfe_pips": card.get("mfe_pips"),
+            "mae_pips": card.get("mae_pips"),
+        } if pick("filled_at", "outcome") else None,
+    }
+
+
+def signal_offline(signal: dict) -> str:
+    """The signal's own record, readable, for when no model can be reached."""
+    d = signal_digest(signal)
+    side = "BUY" if d.get("direction") == "bullish" else "SELL"
+    lines = [f"{d.get('strategy') or 'Signal'} — {side}, fired {d.get('fired') or '—'}"
+             f" ({d.get('session') or 'session unknown'}), score {d.get('score') or '—'}."]
+    if d.get("trigger"):
+        lines.append(f"Trigger: {d['trigger']}.")
+    reasons = d.get("reasons")
+    if isinstance(reasons, list) and reasons:
+        lines.append("Why it fired:\n" + "\n".join(f"- {r}" for r in reasons))
+    agreeing = d.get("agreeing_strategies")
+    if isinstance(agreeing, list) and agreeing:
+        rows = []
+        for a in agreeing:
+            if isinstance(a, dict):
+                evidence = "; ".join(a.get("evidence") or [])
+                rows.append(f"- {a.get('name') or a.get('key')}: {evidence or 'agreed'}")
+        if rows:
+            lines.append("Also agreeing:\n" + "\n".join(rows))
+    zone = d.get("entry_zone") or {}
+    lines.append(f"Entry zone {zone.get('low') or '—'}–{zone.get('high') or '—'}, "
+                 f"stop {d.get('stop') or '—'}, reward/risk {d.get('reward_risk') or '—'}. "
+                 f"Status now: {d.get('status_now') or '—'}.")
+    return "\n\n".join(lines)
+
 
 # --- fact compaction -------------------------------------------------------
 
@@ -332,6 +661,10 @@ def _compact_facts(decision: dict, analysis: dict) -> dict:
         # volatility. The analyst could previously explain what the chart did
         # and never why, which is the half a trader cannot get elsewhere.
         "fundamentals": _fundamental_digest(analysis),
+        # What the wires have said in the last hours, each headline already
+        # tagged for its channel to gold. The calendar says what is scheduled;
+        # this is everything that was not.
+        "news": news_digest(analysis.get("news")),
     }
 
 
@@ -464,36 +797,44 @@ def _timeframe_digest(analysis: dict) -> dict:
     """Per-timeframe summary: the readings, not the full drawing data."""
     out = {}
     for tf, data in (analysis.get("timeframes") or {}).items():
+        # A timeframe without enough candles comes back without some blocks.
+        # Indexing them directly turned that into a KeyError that took every
+        # online explanation down with it; a missing block is now just absent.
+        structure = data.get("structure") or {}
+        candles = data.get("candles") or {}
+        zones = data.get("zones") or {}
+        fvg = data.get("fvg") or {}
+        order_blocks = data.get("order_blocks") or {}
         out[tf] = {
             "role": data.get("role"),
             "bias": data.get("bias"),
             "regime": (data.get("regime") or {}).get("regime"),
             "structure": {
-                "trend": data["structure"]["trend"],
-                "state": data["structure"]["state"],
-                "labels": data["structure"].get("labels"),
-                "last_event": data["structure"].get("last_event"),
-                "next_bullish_break": data["structure"].get("next_bullish_break"),
-                "next_bearish_break": data["structure"].get("next_bearish_break"),
+                "trend": structure.get("trend"),
+                "state": structure.get("state"),
+                "labels": structure.get("labels"),
+                "last_event": structure.get("last_event"),
+                "next_bullish_break": structure.get("next_bullish_break"),
+                "next_bearish_break": structure.get("next_bearish_break"),
             },
             "candles": {
-                "bias": data["candles"]["bias"],
-                "latest": data["candles"].get("latest"),
+                "bias": candles.get("bias"),
+                "latest": candles.get("latest"),
             },
             "zones": {
-                "location": data["zones"]["location"],
-                "nearest_demand": data["zones"].get("nearest_demand"),
-                "nearest_supply": data["zones"].get("nearest_supply"),
+                "location": zones.get("location"),
+                "nearest_demand": zones.get("nearest_demand"),
+                "nearest_supply": zones.get("nearest_supply"),
             },
             "fvg": {
-                "bias": data["fvg"]["bias"],
-                "nearest_bullish": data["fvg"].get("nearest_bullish"),
-                "nearest_bearish": data["fvg"].get("nearest_bearish"),
+                "bias": fvg.get("bias"),
+                "nearest_bullish": fvg.get("nearest_bullish"),
+                "nearest_bearish": fvg.get("nearest_bearish"),
             },
             "order_blocks": {
-                "bias": data["order_blocks"]["bias"],
-                "nearest_bullish": data["order_blocks"].get("nearest_bullish"),
-                "nearest_bearish": data["order_blocks"].get("nearest_bearish"),
+                "bias": order_blocks.get("bias"),
+                "nearest_bullish": order_blocks.get("nearest_bullish"),
+                "nearest_bearish": order_blocks.get("nearest_bearish"),
             },
             "indicators": {k: v.get("note") for k, v in (data.get("indicators") or {}).items()},
             # The v1.2.0 layers. Without these the analyst could not see where

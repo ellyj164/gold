@@ -149,6 +149,30 @@ def set_model(provider: str, model: str | None) -> None:
     _write(data)
 
 
+def get_vision_models(provider: str) -> str:
+    """The image-reading chain, for providers configured with one.
+
+    Stored beside the text models under ``vision_models`` rather than folded
+    into them, because the two lists are not interchangeable: a text model
+    sent a chart either errors or answers as if it had seen it.
+    """
+    stored = (_read().get("vision_models") or {}).get(provider)
+    return (str(stored).strip() if stored
+            else providers.DEFAULT_VISION_MODELS.get(provider, ""))
+
+
+def set_vision_models(provider: str, models: str | None) -> None:
+    data = _read()
+    vision = dict(data.get("vision_models") or {})
+    models = (models or "").strip()
+    if models:
+        vision[provider] = models
+    else:
+        vision.pop(provider, None)
+    data["vision_models"] = vision
+    _write(data)
+
+
 def get_mode() -> str:
     """``online`` or ``offline`` — which analyst the app should use."""
     mode = str(_read().get("mode") or "").strip().lower()
@@ -166,7 +190,9 @@ def set_mode(mode: str) -> None:
 def get_provider() -> str:
     """Which provider online mode should use."""
     name = str(_read().get("provider") or "").strip().lower()
-    return name if name in providers.PROVIDERS else providers.ANTHROPIC
+    # NVIDIA is the default because it is the one that costs nothing: a
+    # trader who pastes a single free key gets the whole chain.
+    return name if name in providers.PROVIDERS else providers.NVIDIA
 
 
 def set_provider(provider: str) -> None:
@@ -184,7 +210,7 @@ def describe() -> dict:
     entries = []
     for name in providers.PROVIDERS:
         source = key_source(name)
-        entries.append({
+        entry = {
             "provider": name,
             "label": providers.PROVIDER_LABELS[name],
             "model": get_model(name),
@@ -193,7 +219,19 @@ def describe() -> dict:
             "key_source": source,
             "key_hint": mask(get_key(name)) if source != "none" else "",
             "env_var": providers.ENV_VARS.get(name, ""),
-        })
+            "chain": name in providers.DEFAULT_VISION_MODELS,
+        }
+        if entry["chain"]:
+            text = providers.parse_chain(entry["model"])
+            vision = providers.parse_chain(get_vision_models(name))
+            entry.update({
+                "vision_models": get_vision_models(name),
+                "default_vision_models": providers.DEFAULT_VISION_MODELS[name],
+                # How each link of the chain did on its last call or probe.
+                "health": {"text": providers.model_health(text),
+                           "vision": providers.model_health(vision)},
+            })
+        entries.append(entry)
 
     ready = any(e["has_key"] for e in entries if e["provider"] == active)
     return {

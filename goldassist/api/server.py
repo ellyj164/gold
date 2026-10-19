@@ -14,7 +14,9 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import (FastAPI, File, Form, HTTPException, Query, Request, UploadFile,
+                     WebSocket, WebSocketDisconnect)
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -22,6 +24,7 @@ from datetime import datetime, timezone
 
 from .. import timeutil
 from .. import __version__
+from ..analysis import events
 from ..ai import providers as ai_providers
 from ..backtest import engine as backtest_engine
 from ..config import AppConfig, MICRO_TIMEFRAMES, TIMEFRAMES
@@ -229,7 +232,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         question = (body.get("question") or "").strip()
         if not question:
             raise HTTPException(400, "A question is required.")
-        return safe(service.ask(question, body.get("history")))
+        # Model calls block for seconds to minutes: never on the event loop.
+        return safe(await run_in_threadpool(service.ask, question, body.get("history")))
 
     @app.post("/api/teach")
     async def teach(request: Request) -> dict:
@@ -237,7 +241,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         concept = (body.get("concept") or "").strip()
         if not concept:
             raise HTTPException(400, "A concept is required.")
-        return safe(service.teach(concept))
+        return safe(await run_in_threadpool(service.teach, concept))
 
     @app.post("/api/explain")
     def explain(refresh: bool = Query(True)) -> dict:
@@ -287,7 +291,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         try:
             return safe(service.ai.apply_settings(
                 mode=mode, provider=provider,
-                keys=body.get("keys") or {}, models=body.get("models") or {}))
+                keys=body.get("keys") or {}, models=body.get("models") or {},
+                vision_models=body.get("vision_models") or {}))
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -299,18 +304,106 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         if provider not in ai_providers.PROVIDERS:
             raise HTTPException(
                 400, f"Provider must be one of: {', '.join(ai_providers.PROVIDERS)}.")
-        return safe(service.ai.test_provider(
-            provider, api_key=body.get("api_key"), model=body.get("model")))
+        # Probing a whole NVIDIA chain takes tens of seconds; off the event
+        # loop, so the live feed keeps flowing while it runs.
+        return safe(await run_in_threadpool(
+            service.ai.test_provider, provider, api_key=body.get("api_key"),
+            model=body.get("model"), vision_models=body.get("vision_models")))
 
-    @app.post("/api/chart-image")
-    async def chart_image(file: UploadFile, question: str = Query(None)) -> dict:
-        data = await file.read()
+    def _image_type(file: UploadFile, data: bytes) -> str:
         if len(data) > 8 * 1024 * 1024:
             raise HTTPException(413, "Image must be 8MB or smaller.")
         media_type = file.content_type or "image/png"
         if media_type not in ("image/png", "image/jpeg", "image/gif", "image/webp"):
             raise HTTPException(400, f"Unsupported image type: {media_type}")
-        return safe(service.ai.analyse_chart_image(data, media_type, question))
+        return media_type
+
+    @app.post("/api/chart-image")
+    async def chart_image(file: UploadFile, question: str = Query(None)) -> dict:
+        data = await file.read()
+        media_type = _image_type(file, data)
+        # A model call can take a minute. Awaited in a worker thread rather
+        # than run here, where it froze every price update until it returned.
+        return safe(await run_in_threadpool(
+            service.ai.analyse_chart_image, data, media_type, question))
+
+    @app.post("/api/ai/chart")
+    async def ai_chart(timeframe: str = Form("H1"), question: str = Form(""),
+                       file: UploadFile | None = File(None)) -> dict:
+        """The AI desk read of the live chart, with its screenshot if sent."""
+        if timeframe not in TIMEFRAMES and timeframe not in MICRO_TIMEFRAMES:
+            raise HTTPException(400, f"Unknown timeframe: {timeframe}")
+        data, media_type = None, "image/jpeg"
+        if file is not None:
+            data = await file.read()
+            media_type = _image_type(file, data)
+        return safe(await run_in_threadpool(
+            service.chart_insight, timeframe, data or None, media_type,
+            question.strip() or None))
+
+    @app.post("/api/ai/signal")
+    async def ai_signal(request: Request) -> dict:
+        """Why a logged signal fired, and whether its facts still hold.
+
+        Takes ``id`` (a row of the signal log) or ``uid`` (the live signal
+        card's suggestion), plus an optional follow-up ``question``.
+        """
+        body = await request.json()
+        signal_id = body.get("id")
+        uid = (body.get("uid") or "").strip() or None
+        if signal_id is None and not uid:
+            raise HTTPException(400, "A signal id or uid is required.")
+        try:
+            signal_id = int(signal_id) if signal_id is not None else None
+        except (TypeError, ValueError):
+            raise HTTPException(400, "The signal id must be a number.") from None
+        question = (body.get("question") or "").strip() or None
+        result = await run_in_threadpool(
+            service.review_signal, signal_id, uid, question, body.get("history"))
+        if result is None:
+            raise HTTPException(404, "No such signal in the log.")
+        return safe(result)
+
+    # -- news --------------------------------------------------------------
+
+    @app.get("/api/news")
+    def news(hours: float = Query(24, ge=1, le=168),
+             impact: str | None = None, bias: str | None = None,
+             limit: int = Query(150, ge=1, le=500)) -> dict:
+        """Tagged headlines, the desk's state, and the week's calendar."""
+        if impact not in (None, "", "high", "medium", "low"):
+            raise HTTPException(400, "impact must be high, medium or low.")
+        if bias not in (None, "", "bullish", "bearish", "neutral"):
+            raise HTTPException(400, "bias must be bullish, bearish or neutral.")
+        state = service.news.read()
+        state.pop("items", None)
+        week = events.upcoming(horizon_hours=24 * 7)
+        # The whole week, not the eight the analysis carries.
+        now = datetime.now(timezone.utc)
+        ahead = [e for e in events.load()
+                 if 0 <= (e["time"] - now).total_seconds() <= 7 * 86400]
+        return safe({
+            "items": service.db.recent_news(hours=hours, limit=limit,
+                                            impact=impact or None, bias=bias or None),
+            "state": state,
+            "calendar": {
+                "next_high_impact": week.get("next_high_impact"),
+                "last_high_impact": week.get("last_high_impact"),
+                "coverage": week.get("coverage"),
+                "events": [{"title": e["title"], "impact": e["impact"],
+                            "time": e["time"].isoformat(),
+                            "forecast": e.get("forecast"), "previous": e.get("previous"),
+                            "details": e.get("details"), "source": e.get("source")}
+                           for e in ahead],
+            },
+            "clock": timeutil.offset_label(),
+        })
+
+    @app.post("/api/news/refresh")
+    def refresh_news() -> dict:
+        """Read the wires now instead of at the next three-minute tick."""
+        service.news.refresh_soon()
+        return {"ok": True}
 
     # -- profiles ----------------------------------------------------------
 

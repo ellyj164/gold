@@ -26,6 +26,13 @@ log = logging.getLogger(__name__)
 
 CALENDAR_PATH = APP_DIR / "calendar.json"
 
+# This week's full US calendar, written hourly by ``news.calendar_feed`` from
+# ForexFactory. Merged into the verified file above when present; its absence
+# changes nothing.
+LIVE_CALENDAR_PATH = APP_DIR / "calendar_live.json"
+
+_IMPACT_RANK = {"low": 0, "medium": 1, "high": 2}
+
 # Releases Gold is most sensitive to, used to flag high impact when a supplied
 # entry omits its own impact field.
 HIGH_IMPACT_KEYWORDS = (
@@ -36,8 +43,63 @@ HIGH_IMPACT_KEYWORDS = (
 
 
 def load(path=None) -> list[dict]:
-    """Read the user's calendar file. Missing or malformed files yield nothing."""
-    source = path or CALENDAR_PATH
+    """The calendar: the verified file, plus this week's live feed.
+
+    With an explicit ``path`` only that file is read, which keeps tests and
+    any caller that names its own calendar exactly as deterministic as before.
+    """
+    if path is not None:
+        return _read(path)
+    return merge(_read(CALENDAR_PATH), _read(LIVE_CALENDAR_PATH))
+
+
+def merge(verified: list[dict], live: list[dict]) -> list[dict]:
+    """One entry per release moment.
+
+    The live feed lists CPI as three rows (headline, core, y/y) at 08:30, and
+    the verified file has "US CPI (October)" at the same minute. Shown as four
+    events, the panel would count four releases and the "next release" line
+    would flicker between them. Rows sharing a minute are folded into one
+    entry: the verified title wins when there is one, the highest impact
+    wins, and every row's forecast and previous are kept as ``details``.
+    """
+    slots: dict[str, dict] = {}
+    for event in verified + live:
+        key = event["time"].strftime("%Y-%m-%dT%H:%M")
+        slot = slots.setdefault(key, {"time": event["time"], "impact": event["impact"],
+                                      "verified": None, "feed": []})
+        if _IMPACT_RANK[event["impact"]] > _IMPACT_RANK[slot["impact"]]:
+            slot["impact"] = event["impact"]
+        if event.get("source"):
+            slot["feed"].append({k: event[k] for k in ("title", "impact", "forecast", "previous")
+                                 if event.get(k) is not None})
+        elif slot["verified"] is None:
+            slot["verified"] = event["title"]
+
+    merged = []
+    for slot in sorted(slots.values(), key=lambda s: s["time"]):
+        feed = slot["feed"]
+        if slot["verified"]:
+            title = slot["verified"]
+        else:
+            # Highest-impact rows name the moment; the rest are in details.
+            ranked = sorted(feed, key=lambda d: -_IMPACT_RANK[d["impact"]])
+            names = [ranked[0]["title"]] + [d["title"].removeprefix("US ") for d in ranked[1:3]]
+            title = " · ".join(names) + (f" +{len(feed) - 3}" if len(feed) > 3 else "")
+        event = {"time": slot["time"], "title": title, "impact": slot["impact"]}
+        if len(feed) == 1:
+            for extra in ("forecast", "previous"):
+                if feed[0].get(extra):
+                    event[extra] = feed[0][extra]
+        if feed:
+            event["details"] = feed
+            event["source"] = "ForexFactory"
+        merged.append(event)
+    return merged
+
+
+def _read(source) -> list[dict]:
+    """One calendar file. Missing or malformed files yield nothing."""
     if not source.exists():
         return []
     try:
@@ -58,7 +120,13 @@ def load(path=None) -> list[dict]:
         impact = str(item.get("impact", "")).lower()
         if impact not in ("high", "medium", "low"):
             impact = "high" if any(k in title.lower() for k in HIGH_IMPACT_KEYWORDS) else "medium"
-        events.append({"time": when, "title": title, "impact": impact})
+        event = {"time": when, "title": title, "impact": impact}
+        # The live feed's extras: carried when present, absent otherwise, so
+        # an entry from the verified file looks exactly as it always did.
+        for extra in ("forecast", "previous", "source"):
+            if item.get(extra):
+                event[extra] = str(item[extra])
+        events.append(event)
 
     events.sort(key=lambda e: e["time"])
     return events
@@ -154,12 +222,16 @@ def upcoming(events: list[dict] | None = None, now: datetime | None = None,
 
     def render(event: dict) -> dict:
         minutes = int((event["time"] - now).total_seconds() // 60)
-        return {
+        out = {
             "title": event["title"],
             "impact": event["impact"],
             "time": event["time"].isoformat(),
             "minutes_until": minutes,
         }
+        for extra in ("forecast", "previous", "details"):
+            if event.get(extra):
+                out[extra] = event[extra]
+        return out
 
     last = None
     if behind:

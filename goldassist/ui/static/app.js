@@ -601,12 +601,57 @@
     if (!entry) return;
     $("aiModel").value = entry.model || entry.default_model || "";
     $("aiModel").placeholder = entry.default_model || "";
+    // A chain provider (NVIDIA) takes ordered lists, and a second list for
+    // the models that may see a chart image.
+    const chain = !!entry.chain;
+    $("aiModelLabel").textContent = chain ? "Text models" : "Model";
+    $("aiVisionRow").hidden = !chain;
+    $("aiChainHint").hidden = !chain;
+    if (chain) {
+      $("aiVision").value = entry.vision_models || entry.default_vision_models || "";
+      $("aiVision").placeholder = entry.default_vision_models || "";
+    }
+    renderAiHealth(chain ? entry.health : null);
     $("aiKey").value = "";
     $("aiKeyState").innerHTML = entry.has_key
       ? `Key set (${escapeHtml(entry.key_hint)}) from ${escapeHtml(entry.key_source)}.`
         + ` Leave the field empty to keep it.`
       : `<span class="warn">No key stored.</span> Paste one, or set `
         + `<code>${escapeHtml(entry.env_var)}</code> in the environment.`;
+  }
+
+  /*
+   * How each model in the chain did, last time it was called or probed.
+   * Accepts either the settings' health block ({text, vision} of state rows)
+   * or a Test result ({text, vision} of probe rows) -- they differ only in
+   * whether the verdict is `ok` or `state`.
+   */
+  function renderAiHealth(health) {
+    const host = $("aiHealth");
+    if (!host) return;
+    if (!health || !((health.text || []).length || (health.vision || []).length)) {
+      host.hidden = true;
+      host.innerHTML = "";
+      return;
+    }
+    const row = (r) => {
+      const st = r.state || (r.ok ? "ok" : "failed");
+      const label = { ok: "answering", failed: "failed", resting: "resting",
+                      untested: "not tried yet" }[st] || st;
+      const time = r.seconds ?? r.latency;
+      const detail = st === "ok"
+        ? (time ? `${time}s` : "")
+        : st === "resting" ? `retry in ${Math.ceil((r.resting_seconds || 0) / 60)} min`
+        : (r.error || r.message || "");
+      return `<li class="h-${st}"><span class="h-dot"></span>
+        <code>${escapeHtml(r.model)}</code>
+        <span class="h-state">${escapeHtml(label)}</span>
+        <span class="h-detail" title="${escapeHtml(detail)}">${escapeHtml(detail)}</span></li>`;
+    };
+    const block = (title, rows) => (rows || []).length
+      ? `<div class="h-group"><b>${title}</b><ol>${rows.map(row).join("")}</ol></div>` : "";
+    host.innerHTML = block("Text chain", health.text) + block("Vision chain", health.vision);
+    host.hidden = false;
   }
 
   async function loadAiSettings() {
@@ -634,7 +679,9 @@
     };
 
     $("aiTestBtn").addEventListener("click", async () => {
-      say("Testing…");
+      const chain = !$("aiVisionRow").hidden;
+      say(chain ? "Testing every model in both chains — this takes up to a minute…"
+                : "Testing…");
       try {
         const r = await api("/api/ai/test", {
           method: "POST",
@@ -644,18 +691,24 @@
             // before it is committed to disk.
             api_key: $("aiKey").value || null,
             model: $("aiModel").value || null,
+            vision_models: chain ? ($("aiVision").value || null) : null,
           }),
         });
         say(r.message, r.ok);
+        if (r.models) renderAiHealth(r.models);
       } catch (err) { say(err.message, false); }
     });
 
     $("aiSaveBtn").addEventListener("click", async () => {
       say("Saving…");
       const provider = $("aiProvider").value;
-      const payload = { mode: $("aiMode").value, provider, keys: {}, models: {} };
+      const payload = { mode: $("aiMode").value, provider, keys: {}, models: {},
+                        vision_models: {} };
       if ($("aiKey").value) payload.keys[provider] = $("aiKey").value;
       if ($("aiModel").value) payload.models[provider] = $("aiModel").value;
+      if (!$("aiVisionRow").hidden && $("aiVision").value) {
+        payload.vision_models[provider] = $("aiVision").value;
+      }
       try {
         const saved = await api("/api/ai/settings", {
           method: "POST", body: JSON.stringify(payload),
@@ -675,6 +728,213 @@
         }
       } catch (err) { say(err.message, false); }
     });
+  }
+
+  /* --------------------------------------------------------- AI drawer
+   *
+   * On-demand reads: the chart read (toolbar button) and the signal audit
+   * (the AI button on a signal). Both land in the same slide-in panel, and a
+   * follow-up typed there goes back to whichever produced it, carrying the
+   * conversation so far.
+   */
+  state.drawer = null;
+
+  function openDrawer(title, context) {
+    state.drawer = { ...context, history: [] };
+    $("aiDrawerTitle").textContent = title;
+    $("aiDrawerStamp").textContent = "";
+    $("aiDrawerNote").hidden = true;
+    $("aiDrawerBody").innerHTML = `<p class="muted">Reading the market… the first
+      model to answer wins, which can take up to a minute when models are busy.</p>`;
+    $("aiDrawer").hidden = false;
+  }
+
+  function showDrawerResult(result, question) {
+    const tag = ["offline", "system", "error", "unavailable"].includes(result.source)
+      ? `<span class="src offline">${escapeHtml(result.source === "offline" ? "offline" : result.source)}</span>`
+      : `<span class="src">AI analyst</span>`;
+    const asked = question ? `<p class="ai-q">${escapeHtml(question)}</p>` : "";
+    const html = tag + asked + markdownLite(result.text);
+    // A follow-up appends below the first read instead of replacing it: the
+    // trader is comparing the answer with what was said before.
+    if (question && state.drawer && state.drawer.history.length) {
+      $("aiDrawerBody").insertAdjacentHTML("beforeend", `<hr>${html}`);
+      $("aiDrawerBody").scrollTop = $("aiDrawerBody").scrollHeight;
+    } else {
+      $("aiDrawerBody").innerHTML = html;
+    }
+
+    const bits = [];
+    if (result.generated_at) bits.push(`${result.generated_at} ${state.clock.label}`);
+    if (result.price !== undefined && result.price !== null) bits.push(`at ${fmt(result.price)}`);
+    if (result.model) bits.push(result.model.split("/").pop());
+    if (result.used_image) bits.push("read the chart image");
+    if (result.fallbacks && result.fallbacks.length) {
+      bits.push(`${result.fallbacks.length} busy model${result.fallbacks.length > 1 ? "s" : ""} skipped`);
+    }
+    $("aiDrawerStamp").textContent = bits.join(" · ");
+    $("aiDrawerStamp").title = (result.fallbacks || []).join("\n");
+
+    const note = $("aiDrawerNote");
+    note.hidden = !result.note;
+    note.textContent = result.note || "";
+
+    if (state.drawer && result.text) {
+      if (question) state.drawer.history.push({ role: "user", content: question });
+      state.drawer.history.push({ role: "assistant", content: result.text });
+    }
+  }
+
+  function drawerError(err) {
+    $("aiDrawerBody").insertAdjacentHTML("beforeend",
+      `<p class="err">${escapeHtml(err.message || String(err))}</p>`);
+  }
+
+  /*
+   * The chart as the trader sees it, as a JPEG small enough for a hosted
+   * vision model. The canvas is transparent where nothing is drawn, so it is
+   * painted onto the page background first -- a transparent JPEG comes out
+   * black, and a chart on black is not the chart the trader is looking at.
+   * NVIDIA refuses inline images much over ~180 KB, so the export steps the
+   * size and quality down until it fits.
+   */
+  async function shrinkToJpeg(source, width, height) {
+    if (!source || !width || !height) return null;
+    const background = getComputedStyle(document.documentElement)
+      .getPropertyValue("--panel").trim() || "#121722";
+    const attempt = (maxWidth, quality) => new Promise((resolve) => {
+      const scale = Math.min(1, maxWidth / width);
+      const out = document.createElement("canvas");
+      out.width = Math.round(width * scale);
+      out.height = Math.round(height * scale);
+      const ctx = out.getContext("2d");
+      ctx.fillStyle = background;
+      ctx.fillRect(0, 0, out.width, out.height);
+      ctx.drawImage(source, 0, 0, out.width, out.height);
+      out.toBlob(resolve, "image/jpeg", quality);
+    });
+    for (const [maxWidth, quality] of [[1400, 0.82], [1200, 0.72], [1000, 0.62], [800, 0.55]]) {
+      const blob = await attempt(maxWidth, quality);
+      if (blob && blob.size <= 130 * 1024) return blob;
+    }
+    return null;
+  }
+
+  function captureChart() {
+    const source = $("chart");
+    return shrinkToJpeg(source, source && source.width, source && source.height);
+  }
+
+  // An uploaded screenshot, shrunk the same way. Falls back to the original
+  // file if the browser cannot decode it, so the server can still say why.
+  async function shrinkUpload(file) {
+    try {
+      const bitmap = await createImageBitmap(file);
+      return (await shrinkToJpeg(bitmap, bitmap.width, bitmap.height)) || file;
+    } catch (_) {
+      return file;
+    }
+  }
+
+  async function runChartRead(question) {
+    if (!question) {
+      openDrawer(`AI chart read — ${state.timeframe}`, { kind: "chart", timeframe: state.timeframe });
+    }
+    const form = new FormData();
+    form.append("timeframe", state.drawer.timeframe);
+    form.append("question", question || "");
+    // Only the first read sends the picture: a follow-up is about what was
+    // already said, and re-sending the image would only slow it down.
+    if (!question) {
+      try {
+        const blob = await captureChart();
+        if (blob) form.append("file", blob, "chart.jpg");
+      } catch (err) { console.warn("chart capture failed", err); }
+    }
+    try {
+      const res = await fetch("/api/ai/chart", { method: "POST", body: form });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || res.statusText);
+      showDrawerResult(data, question);
+    } catch (err) { drawerError(err); }
+  }
+
+  async function runSignalReview(ref, question) {
+    if (!question) {
+      openDrawer(ref.title || "Why this signal fired", { kind: "signal", ref });
+    }
+    try {
+      const body = { question: question || null,
+                     history: question ? state.drawer.history.slice(-6) : null };
+      if (ref.id !== undefined && ref.id !== null) body.id = ref.id;
+      else body.uid = ref.uid;
+      const data = await api("/api/ai/signal", { method: "POST", body: JSON.stringify(body) });
+      showDrawerResult(data, question);
+    } catch (err) { drawerError(err); }
+  }
+
+  function wireDrawer() {
+    $("aiDrawerClose").addEventListener("click", () => {
+      $("aiDrawer").hidden = true;
+      state.drawer = null;
+    });
+    $("aiChartBtn").addEventListener("click", () => runChartRead());
+    $("aiDrawerForm").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const q = $("aiDrawerInput").value.trim();
+      if (!q || !state.drawer) return;
+      $("aiDrawerInput").value = "";
+      $("aiDrawerBody").insertAdjacentHTML("beforeend",
+        `<p class="muted ai-pending">…asking</p>`);
+      const done = () => document.querySelectorAll(".ai-pending").forEach((el) => el.remove());
+      const run = state.drawer.kind === "chart"
+        ? runChartRead(q) : runSignalReview(state.drawer.ref, q);
+      run.finally(done);
+    });
+    // Signal log rows carry the log's row id; the live signal card knows only
+    // its suggestion's uid. Separate attributes, because a hex uid can be
+    // all digits and must never be mistaken for a row id.
+    document.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-ai-signal], [data-ai-uid]");
+      if (!btn) return;
+      e.preventDefault();
+      runSignalReview({
+        id: btn.dataset.aiSignal ? Number(btn.dataset.aiSignal) : null,
+        uid: btn.dataset.aiUid || null,
+        title: btn.dataset.aiTitle || "Why this signal fired",
+      });
+    });
+  }
+
+  /*
+   * Models answer in light Markdown: headings, bold, bullet lists. Rendered
+   * from escaped text, so nothing the model writes can become markup.
+   */
+  function markdownLite(text) {
+    const inline = (s) => s
+      .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+      .replace(/`([^`]+)`/g, "<code>$1</code>");
+    const out = [];
+    let list = null;
+    const close = () => { if (list) { out.push(`</${list}>`); list = null; } };
+    for (const raw of escapeHtml(text || "").split("\n")) {
+      const line = raw.trimEnd();
+      let m;
+      if (!line.trim()) { close(); continue; }
+      if ((m = line.match(/^#{1,4}\s+(.*)$/))) {
+        close(); out.push(`<h4>${inline(m[1])}</h4>`);
+      } else if ((m = line.match(/^\s*[-*•]\s+(.*)$/))) {
+        if (list !== "ul") { close(); out.push("<ul>"); list = "ul"; }
+        out.push(`<li>${inline(m[1])}</li>`);
+      } else if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) {
+        if (list !== "ol") { close(); out.push("<ol>"); list = "ol"; }
+        out.push(`<li>${inline(m[1])}</li>`);
+      } else {
+        close(); out.push(`<p>${inline(line)}</p>`);
+      }
+    }
+    close();
+    return out.join("");
   }
 
   function notifyDesktop(s, kind) {
@@ -888,6 +1148,10 @@ ${firedAt}`,
             .map((r) => `<li class="warn-medium">${escapeHtml(r)}</li>`).join("")}</ul>`
         : ""}
 
+      <button class="btn ghost tiny signal-ai" type="button" data-ai-uid="${escapeHtml(s.id)}"
+        data-ai-title="${escapeHtml(`${dir} · ${s.strategy_name || s.setup_label || "live signal"}`)}"
+        title="Why this fired, and whether its facts still hold now">Ask AI why it fired</button>
+
       <details class="signal-history">
         <summary>Setup history (${(s.history || []).length})</summary>
         <ul>${(s.history || []).slice().reverse().map((h) => `
@@ -1094,7 +1358,7 @@ ${firedAt}`,
     const tag = explanation.source === "claude"
       ? `<span class="src">AI analyst</span>`
       : `<span class="src offline">offline explanation</span>`;
-    $("explanation").innerHTML = tag + paragraphs(explanation.text);
+    $("explanation").innerHTML = tag + markdownLite(explanation.text);
   }
 
   function connectSocket() {
@@ -1134,6 +1398,15 @@ ${firedAt}`,
         const list = (state.snapshot && state.snapshot.updates) || [];
         list.unshift(message.update);
         renderUpdates(list.slice(0, 20));
+      } else if (message.type === "news") {
+        // A fresh high-impact headline. Toast it, mark the tab, and refresh
+        // the list if the trader is already looking at it.
+        newsToast(message.item);
+        const newsList = (state.snapshot && state.snapshot.updates) || [];
+        newsList.unshift(message.update);
+        renderUpdates(newsList.slice(0, 20));
+        if ($("view-news").classList.contains("active")) loadNews();
+        else $("newsDot").hidden = false;
       } else if (message.type === "desk") {
         if (message.trader) renderTrader(message.trader);
         const deskList = (state.snapshot && state.snapshot.updates) || [];
@@ -1661,8 +1934,11 @@ ${firedAt}`,
         <td>${Math.round(r.score ?? 0)}</td>
         <td class="muted">${escapeHtml(r.last_status || r.status || "")}</td>
         <td>${result}</td>
+        <td><button class="btn ghost tiny" type="button" data-ai-signal="${r.id}"
+          data-ai-title="${escapeHtml(`${r.direction === "bullish" ? "BUY" : "SELL"} · ${r.strategy_name || r.strategy || "signal"} · ${r.fired_clock || ""}`)}"
+          title="Why this fired, and whether its facts still hold">Ask AI</button></td>
       </tr>`;
-    }).join("") || `<tr><td colspan="13" class="muted">
+    }).join("") || `<tr><td colspan="14" class="muted">
       No signal has fired yet for this filter. Every setup any strategy
       identifies is logged here the moment it appears.</td></tr>`;
   }
@@ -1707,6 +1983,166 @@ ${firedAt}`,
 
   // ------------------------------------------------------------- profiles
 
+  /* ------------------------------------------------------------------ news
+   *
+   * Headlines from the wires, each tagged for its bearing on gold, and the
+   * week's US releases. Read on the server's own thread every three minutes;
+   * this only draws what is already there.
+   */
+  state.news = { filter: "important" };
+
+  const NEWS_FILTERS = {
+    important: { hours: 24, keep: (i) => i.impact === "high" || i.impact === "medium" },
+    high: { hours: 48, impact: "high" },
+    bullish: { hours: 24, bias: "bullish", keep: (i) => i.impact !== "low" },
+    bearish: { hours: 24, bias: "bearish", keep: (i) => i.impact !== "low" },
+    all: { hours: 24 },
+  };
+
+  async function loadNews() {
+    $("newsDot").hidden = true;
+    const f = NEWS_FILTERS[state.news.filter] || NEWS_FILTERS.important;
+    const query = new URLSearchParams({ hours: f.hours });
+    if (f.impact) query.set("impact", f.impact);
+    if (f.bias) query.set("bias", f.bias);
+    try {
+      const data = await api(`/api/news?${query}`);
+      const items = (data.items || []).filter(f.keep || (() => true));
+      renderNewsSummary(data.state || {});
+      renderNewsList(items);
+      renderCalendar(data.calendar || {});
+    } catch (err) {
+      $("newsList").innerHTML = `<li class="err">${escapeHtml(err.message)}</li>`;
+    }
+  }
+
+  function relTime(iso) {
+    const minutes = Math.round((Date.now() - asDate(iso).getTime()) / 60000);
+    if (minutes < 1) return "just now";
+    if (minutes < 60) return `${minutes}m ago`;
+    if (minutes < 1440) return `${Math.floor(minutes / 60)}h ${minutes % 60}m ago`;
+    return `${Math.floor(minutes / 1440)}d ago`;
+  }
+
+  function renderNewsSummary(st) {
+    const b = st.balance || {};
+    const parts = [];
+    if (st.initialising) {
+      parts.push(`<span class="muted">${escapeHtml(st.note || "Reading the wires…")}</span>`);
+    } else {
+      parts.push(`<span class="chip bull">${b.bullish || 0} bullish</span>`,
+                 `<span class="chip bear">${b.bearish || 0} bearish</span>`,
+                 `<span class="chip">${b.neutral || 0} neutral</span>`,
+                 `<span class="muted small">high &amp; medium impact, last 12h</span>`);
+      // Who tagged them matters: a model's reading and a keyword match are
+      // not the same evidence, and the panel must not let them look alike.
+      parts.push(st.classifier
+        ? `<span class="muted small">· tagged by ${escapeHtml(st.classifier.split("/").pop())}</span>`
+        : `<span class="muted small" title="No AI model was reachable on the last check; set one up under Analysis → AI analyst → Settings">· keyword tags (AI offline)</span>`);
+      if (st.updated_at) parts.push(`<span class="muted small">· checked ${escapeHtml(relTime(st.updated_at))}</span>`);
+    }
+    if (st.note && !st.initialising) parts.push(`<div class="warn small">${escapeHtml(st.note)}</div>`);
+    $("newsSummary").innerHTML = parts.join(" ");
+  }
+
+  function renderNewsList(items) {
+    $("newsCount").textContent = items.length;
+    $("newsList").innerHTML = items.map((i) => {
+      const bias = i.bias || "neutral";
+      const arrow = bias === "bullish" ? "▲" : bias === "bearish" ? "▼" : "•";
+      const keywords = i.classified_by === "keywords";
+      const link = /^https?:\/\//.test(i.link || "")
+        ? `<a href="${escapeHtml(i.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(i.title)}</a>`
+        : escapeHtml(i.title);
+      return `<li class="news-item impact-${escapeHtml(i.impact || "low")} ${escapeHtml(bias)}">
+        <div class="ni-meta">
+          <span class="ni-time" title="${escapeHtml(fmtFull(i.published_at))}">${escapeHtml(fmtClock(i.published_at))}</span>
+          <span class="ni-ago">${escapeHtml(relTime(i.published_at))}</span>
+          <span class="ni-source">${escapeHtml(i.source_name || i.source || "")}</span>
+          <span class="ni-impact">${escapeHtml(i.impact || "—")}</span>
+        </div>
+        <div class="ni-title">${link}</div>
+        <div class="ni-read"><span class="ni-bias">${arrow} ${escapeHtml(bias)}</span>
+          <span class="ni-reason">${escapeHtml(i.reason || "")}</span>
+          ${keywords ? `<span class="ni-kw" title="Tagged by keyword matching, not a model">kw</span>` : ""}</div>
+      </li>`;
+    }).join("") || `<li class="muted">No headlines for this filter yet. The wires are
+      checked every three minutes; try "All" for everything read.</li>`;
+  }
+
+  function renderCalendar(cal) {
+    const next = cal.next_high_impact;
+    const last = cal.last_high_impact;
+    const bits = [];
+    if (next) bits.push(`<div class="cal-up"><b>Next high impact:</b> ${escapeHtml(next.title)}
+      · ${escapeHtml(fmtDayShort(next.time))} ${escapeHtml(fmtClock(next.time))}
+      <span class="muted">(in ${Math.floor(next.minutes_until / 60)}h ${next.minutes_until % 60}m)</span></div>`);
+    if (last) bits.push(`<div class="cal-up muted">Last: ${escapeHtml(last.title)},
+      ${last.minutes_since} min ago</div>`);
+    if (cal.coverage && cal.coverage.warning) {
+      bits.push(`<div class="warn small">${escapeHtml(cal.coverage.warning)}</div>`);
+    }
+    $("calNext").innerHTML = bits.join("") || `<div class="muted">No high-impact release in the next 24 hours.</div>`;
+
+    const rows = (cal.events || []).map((e) => {
+      const detail = (e.details || []).length > 1
+        ? e.details.map((d) => `${d.title.replace(/^US /, "")}: ${d.forecast || "—"} / ${d.previous || "—"}`).join("\n")
+        : "";
+      return `<tr class="cal-${escapeHtml(e.impact)}" title="${escapeHtml(detail)}">
+        <td class="muted">${escapeHtml(fmtDayShort(e.time))} ${escapeHtml(fmtClock(e.time))}</td>
+        <td><span class="cal-dot"></span>${escapeHtml(e.title)}${(e.details || []).length > 1
+          ? ` <span class="muted small">(${e.details.length})</span>` : ""}</td>
+        <td>${escapeHtml(e.forecast || (e.details && e.details.length > 1 ? "hover" : "—"))}</td>
+        <td>${escapeHtml(e.previous || "—")}</td></tr>`;
+    }).join("");
+    $("calTable").querySelector("tbody").innerHTML = rows
+      || `<tr><td colspan="4" class="muted">No US releases in the next seven days.</td></tr>`;
+  }
+
+  function newsToast(item) {
+    const host = $("alertToasts");
+    if (!host || !item) return;
+    const el = document.createElement("div");
+    const bias = item.bias || "neutral";
+    el.className = `alert-toast news ${bias === "bullish" ? "bullish" : bias === "bearish" ? "bearish" : ""}`;
+    el.innerHTML = `<button class="at-close" title="Dismiss">×</button>
+      <div class="at-head"><span class="at-dir">NEWS</span>
+        <span class="at-title">High impact · ${escapeHtml(bias)} for gold</span></div>
+      <div class="at-setup">${escapeHtml(item.title)}</div>
+      <div class="at-when">${escapeHtml(item.source_name || "")} · ${escapeHtml(fmtClock(item.published_at))}
+        — ${escapeHtml(item.reason || "")}</div>`;
+    const dismiss = () => { el.classList.add("leaving"); setTimeout(() => el.remove(), 260); };
+    el.querySelector(".at-close").addEventListener("click", (e) => { e.stopPropagation(); dismiss(); });
+    el.addEventListener("click", () => {
+      document.querySelector('.tab[data-view="news"]').click();
+      dismiss();
+    });
+    host.prepend(el);
+    while (host.children.length > 4) host.lastElementChild.remove();
+    setTimeout(dismiss, 30000);
+    try { sound.ensure(); } catch (_) { /* sound is a bonus */ }
+  }
+
+  function wireNews() {
+    document.querySelectorAll(".news-filter").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".news-filter").forEach((b) => b.classList.toggle("active", b === btn));
+        state.news.filter = btn.dataset.filter;
+        loadNews();
+      });
+    });
+    $("newsRefresh").addEventListener("click", async () => {
+      $("newsSummary").innerHTML = `<span class="muted">Checking the wires…</span>`;
+      try { await api("/api/news/refresh", { method: "POST" }); } catch (_) { /* shown below */ }
+      // The cycle runs on the server's thread; give it time to land.
+      setTimeout(loadNews, 8000);
+    });
+    // Ages ("12m ago") go stale on screen; redraw while the tab is open.
+    setInterval(() => {
+      if ($("view-news").classList.contains("active")) loadNews();
+    }, 120000);
+  }
+
   async function loadProfiles() {
     const data = await api("/api/profiles");
     const options = data.profiles
@@ -1730,6 +2166,7 @@ ${firedAt}`,
         if (view === "analysis") renderDashboardTable();
         if (view === "trader") loadTrader();
         if (view === "signals") loadFired();
+        if (view === "news") loadNews();
         if (view === "history") { loadOutcomes(); loadSignals(); }
         if (view === "journal") loadJournal();
         if (view === "backtest") loadBacktests();
@@ -2001,8 +2438,10 @@ ${firedAt}`,
         method: "POST",
         body: JSON.stringify({ question, history: state.chatHistory.slice(-8) }),
       });
-      pending.innerHTML = (res.source && res.source !== "claude"
-        ? `<span class="src offline">${escapeHtml(res.source)}</span>` : "") + paragraphs(res.text);
+      // Only the fallbacks are tagged; an answer from any online model is
+      // the normal case and needs no label.
+      pending.innerHTML = (["offline", "system", "error"].includes(res.source)
+        ? `<span class="src offline">${escapeHtml(res.source)}</span>` : "") + markdownLite(res.text);
       state.chatHistory.push({ role: "assistant", content: res.text });
     } catch (err) {
       pending.innerHTML = `<span class="err">${escapeHtml(err.message)}</span>`;
@@ -2088,16 +2527,19 @@ ${firedAt}`,
     });
 
     wireAiSettings();
+    wireDrawer();
+    wireNews();
 
     $("chartImageInput").addEventListener("change", async (e) => {
       const file = e.target.files[0];
       if (!file) return;
       $("chartImageResult").textContent = "Analysing image…";
       const form = new FormData();
-      form.append("file", file);
+      const image = await shrinkUpload(file);
+      form.append("file", image, image === file ? file.name : "chart.jpg");
       const res = await fetch("/api/chart-image", { method: "POST", body: form });
       const data = await res.json();
-      $("chartImageResult").innerHTML = paragraphs(data.text || data.error || "No result.");
+      $("chartImageResult").innerHTML = markdownLite(data.text || data.detail || data.error || "No result.");
     });
 
     document.querySelectorAll(".filter").forEach((btn) => {
@@ -2165,7 +2607,7 @@ ${firedAt}`,
         method: "POST",
         body: JSON.stringify({ concept: btn.dataset.concept }),
       });
-      $("learnOutput").innerHTML = paragraphs(res.text);
+      $("learnOutput").innerHTML = markdownLite(res.text);
     });
 
     $("learnForm").addEventListener("submit", async (e) => {
@@ -2174,7 +2616,7 @@ ${firedAt}`,
       if (!concept) return;
       $("learnOutput").textContent = "Explaining…";
       const res = await api("/api/teach", { method: "POST", body: JSON.stringify({ concept }) });
-      $("learnOutput").innerHTML = paragraphs(res.text);
+      $("learnOutput").innerHTML = markdownLite(res.text);
     });
   }
 

@@ -11,6 +11,7 @@ test without starting a web server.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -28,7 +29,9 @@ from ..jsonsafe import safe
 from ..storage import Database
 from ..trader import TradingDesk
 from ..fundamentals import GoldDrivers
+from ..news import NewsDesk
 from .. import signals
+from .. import timeutil
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +85,11 @@ class AnalysisService:
         # thread -- these are network calls against daily series and must never
         # sit on the five-second analysis cycle.
         self.drivers = GoldDrivers()
+        # Headlines and this week's calendar, on their own thread for the same
+        # reason. The model tags each headline; a fresh high-impact one raises
+        # an alert like a signal does.
+        self.news = NewsDesk(self.db, self.ai.classify_headlines,
+                             on_breaking=self._news_alert)
         self.updates: deque[dict] = deque(maxlen=100)
         self.status = {
             "connected": False,
@@ -418,6 +426,7 @@ class AnalysisService:
         # to happen inside the first analysis cycle. By the time MT5 has primed
         # its history the fundamental picture is usually already there.
         self.drivers.start()
+        self.news.start()
         self.source.connect()
         self.feed.prime()
         self.status.update(connected=True, symbol=self.source.symbol, error=None)
@@ -432,6 +441,7 @@ class AnalysisService:
         # not be allowed to start the terminal again while we wait for it.
         self.source.close_for_good()
         self.drivers.stop()
+        self.news.stop()
         if self._thread:
             self._thread.join(timeout=5)
         self.source.shutdown()
@@ -478,6 +488,11 @@ class AnalysisService:
         # refresh, or an "initialising" state before the first one lands.
         analysis["fundamentals"] = self.drivers.read(
             analysis.get("price")).to_dict()
+        # The newest tagged headlines, trimmed: this rides every cycle's
+        # broadcast, and the News tab reads the full list from /api/news.
+        news = self.news.read()
+        analysis["news"] = {**{k: v for k, v in news.items() if k != "feeds"},
+                            "items": (news.get("items") or [])[:15]}
         decision = decision_engine.decide(analysis, self.profile)
         # What a score like this one has actually been worth, so no explanation
         # -- model or offline -- can present the number without its record.
@@ -663,6 +678,21 @@ class AnalysisService:
             self.updates.appendleft(entry)
         self.db.add_alert("desk", message, {})
         self._publish({"type": "desk", "update": entry, "trader": safe(self.trader)})
+
+    def _news_alert(self, item: dict) -> None:
+        """A fresh, high-impact headline: alert it like a signal stage."""
+        lean = {"bullish": "supportive for gold", "bearish": "weighs on gold"}.get(
+            item.get("bias"), "direction unclear")
+        text = f"NEWS · {item.get('source_name') or item.get('source')}: {item['title']} ({lean})"
+        self.db.add_alert("news", text, {"news_id": item["id"], "bias": item.get("bias"),
+                                         "link": item.get("link")})
+        entry = {"time": item.get("published_at"), "message": text,
+                 "decision": (self.decision or {}).get("decision", "WAIT"),
+                 "score": (self.decision or {}).get("score", 0),
+                 "price": (self.decision or {}).get("price", 0)}
+        with self._lock:
+            self.updates.appendleft(entry)
+        self._publish({"type": "news", "update": entry, "item": safe(item)})
 
     def _signal_alert(self, suggestion: signals.Suggestion, message: str) -> None:
         """Record a signal-stage alert, respecting the profile's threshold."""
@@ -882,6 +912,49 @@ class AnalysisService:
         with self._lock:
             analysis = self.analysis
         return self.ai.teach(concept, analysis)
+
+    def chart_insight(self, timeframe: str, image: bytes | None = None,
+                      media_type: str = "image/jpeg",
+                      question: str | None = None) -> dict:
+        """The AI desk read of the chart the trader is looking at."""
+        with self._lock:
+            decision, analysis, trader = self.decision, self.analysis, self.trader
+        if not decision:
+            return {"text": "Analysis is not ready yet.", "source": "system"}
+        result = dict(self.ai.chart_insight(
+            timeframe, decision, analysis, trader, image_bytes=image,
+            media_type=media_type, question=question))
+        result["generated_at"] = timeutil.stamp(datetime.now(timezone.utc).isoformat())
+        result["price"] = analysis.get("price")
+        return result
+
+    def review_signal(self, signal_id: int | None = None, uid: str | None = None,
+                      question: str | None = None,
+                      history: list[dict] | None = None) -> dict | None:
+        """Why one logged signal fired, checked against the market now.
+
+        None when there is no such signal, so the route can answer 404.
+        """
+        record = self.db.fired_signal(signal_id=signal_id, uid=uid)
+        if not record:
+            return None
+        # These three are stored as JSON text and are not in the database
+        # layer's list of columns it decodes.
+        for column in ("card", "reasons", "confirmations"):
+            value = record.get(column)
+            if isinstance(value, str) and value[:1] in "[{":
+                try:
+                    record[column] = json.loads(value)
+                except ValueError:
+                    pass
+        with self._lock:
+            decision, analysis, trader = self.decision, self.analysis, self.trader
+        result = dict(self.ai.review_signal(record, decision, analysis, trader,
+                                            question=question, history=history))
+        result["signal_id"] = record.get("id")
+        result["generated_at"] = timeutil.stamp(datetime.now(timezone.utc).isoformat())
+        result["price"] = (analysis or {}).get("price")
+        return result
 
     # -- websocket fan-out --------------------------------------------------
 

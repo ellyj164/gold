@@ -1622,3 +1622,111 @@ rule is built on confirmations** until a replay groups on the at-fill count.
 The skip-on / skip-off replay of the last 60 cached days (Jul 6 → Sep 3) was
 stopped by low system memory before producing results. It is the next step.
 
+
+---
+
+## v1.10.0 — NVIDIA model chain, AI chart read, signal audit (2026-10-19)
+
+### What was asked
+
+An AI that reads the chart's structure with real market intelligence, can be
+asked *why* a specific signal fired and whether those facts still hold, and
+runs on the free NVIDIA models (build.nvidia.com) with automatic failover
+from one model to the next.
+
+### Built
+
+1. **NVIDIA provider as a chain** (`ai/providers.py`, `NvidiaProvider`). The
+   model field holds an ordered list; a separate vision list holds the models
+   allowed to see an image. Each call walks the list and the first real answer
+   wins. A failed model rests: 60 s after a rate limit, 3 min after a timeout
+   or server error, 6 h when the catalogue has retired it. A rejected key ends
+   the walk at once (every model shares it). Per-model timeout 45 s (75 s with
+   an image), 150 s for the whole walk. Nemotron 3 models are sent
+   `enable_thinking: false`, without which they can spend the budget thinking
+   and return nothing; `<think>` blocks are stripped and an empty answer
+   counts as a failure. NVIDIA is now the default provider.
+2. **Settings show the chain.** Test probes every text and vision model in
+   parallel and lists which answer today, which rest and why. A new key clears
+   the health table.
+3. **AI chart read** (toolbar button → `/api/ai/chart`). Sends the chart as
+   drawn on screen (JPEG, shrunk under NVIDIA's ~180 KB inline limit) *and* the
+   engine's facts plus the desk digest. The prompt splits the work: numbers
+   only from the facts, shape only from the picture. Top-down D1→M5, then
+   scenarios with triggers and invalidation, the engine's view, the risks. No
+   vision model → read from the facts, labelled as such; offline → the
+   engine's own narrative.
+4. **Signal audit** ("Ask AI" on each Signals-tab row and on the live signal
+   card → `/api/ai/signal`). Sends what the signal *recorded* — trigger,
+   reasons, the agreeing strategies' own evidence, entry rationale, flagged
+   risks, status history, result — next to the market now, and asks for each
+   fact to be marked Still holds / Changed / Cannot verify. Follow-up
+   questions keep the conversation. Offline it shows the signal's own record.
+5. `desk_digest` existed and was never called; both new reads now send it.
+
+### Fixed on the way
+
+- `/api/ask`, `/api/teach` and `/api/chart-image` ran the model call on the
+  event loop, freezing price updates for up to 90 s. All model calls now run
+  in a worker thread.
+- `_timeframe_digest` indexed every block directly; a timeframe missing one
+  raised KeyError and took the online explanation down. Missing blocks are
+  now absent instead.
+- Uploaded screenshots are shrunk before upload (NVIDIA rejects large inline
+  images). AI text renders headings/bold/lists, escaped first.
+- **The check()-style test suites could not fail under pytest**: failures went
+  into `FAILURES` and nothing read it. `tests/conftest.py` now fails the test
+  that added to it. With it on, all 175 tests pass.
+
+### Not yet verified
+
+The default chain order comes from the 2026-10-18 probe on the server
+account. Which models answer — the vision models above all, which had never
+been probed — is only known once a key is saved here and Test is pressed.
+
+---
+
+## v1.11.0 — news desk and the full US calendar (2026-10-19)
+
+### What was found
+
+The release-warning layer had never run on this machine: `calendar.json` had
+not been generated, so `events.upcoming` reported no calendar and the
+8-point news penalty in `confluence` could never fire. Generated with
+`calendar_sync` (44 events, FOMC/CPI/payrolls). It only carries those three
+families, and 2027's FOMC and CPI dates are not in it yet.
+
+### Built
+
+1. **`goldassist/news/`** — a background desk like the fundamentals thread:
+   - `feeds`: ten public RSS feeds (Google News gold phrases, InvestingLive,
+     FXStreet, Fed speeches and policy press releases, CNBC, MarketWatch,
+     Investing.com). Broad feeds keep only gold-relevant headlines; chart-idea
+     posts, rupee jewellery prices and personal-finance columns are excluded
+     everywhere. 30 newest per feed, 48 h, one row per story (id = hash of
+     the normalised title). Kitco's RSS is gone (404) and Investing.com's
+     metals feed has been frozen since August; both left out.
+   - `impact`: keyword fallback tagger, labelled "keywords". Another
+     economy's data or currency story is low impact unless it names gold or
+     the Fed (Canada CPI is not US CPI).
+   - Model tagging via `AIAnalyst.classify_headlines` (NVIDIA chain, own
+     provider instance so it never races the trader's calls). Strict JSON;
+     each item validated, invented ids or values dropped.
+   - Alerts: high impact *and* published in the last 90 minutes, once.
+2. **`calendar_feed`**: ForexFactory's weekly JSON, US only, medium/high,
+   written hourly to `calendar_live.json`. `events.load()` merges it with the
+   verified file, one entry per minute (CPI's three rows + "US CPI (October)"
+   = one entry, details kept). So PPI, PCE, claims, PMIs now also drive the
+   release penalty and warnings. No actuals: the feed has none.
+3. `analysis["news"]` (top 15, tagged) → `news_digest` in the analyst facts;
+   prompts say it is context, never a signal, and the signal audit checks for
+   high-impact headlines since the signal fired.
+4. **News tab**: filters (important/high/bullish/bearish/all), who tagged
+   (model or keywords), feed health, this week's calendar with forecast /
+   previous; toast + tab dot on breaking news.
+
+### Not changed, deliberately
+
+News does not move the score. It has never been tested against outcomes,
+and a headline-driven score is exactly the kind of untested lever the live
+record has already punished.

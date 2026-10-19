@@ -238,6 +238,28 @@ CREATE TABLE IF NOT EXISTS alerts (
     seen            INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at DESC);
+
+-- Gold-relevant headlines and how each was read. One row per story: the id
+-- is a hash of the normalised title, so the same story arriving from two
+-- feeds is stored once. ``classified_by`` is the model's name, or
+-- "keywords" when no model could be reached -- the panel says which.
+CREATE TABLE IF NOT EXISTS news_items (
+    id              TEXT PRIMARY KEY,
+    source          TEXT NOT NULL,
+    source_name     TEXT,
+    title           TEXT NOT NULL,
+    link            TEXT,
+    summary         TEXT,
+    published_at    TEXT NOT NULL,          -- UTC ISO
+    seen_at         TEXT NOT NULL,          -- when this app first read it
+    bias            TEXT,                   -- bullish | bearish | neutral (for gold)
+    impact          TEXT,                   -- high | medium | low
+    reason          TEXT,
+    classified_by   TEXT,
+    classified_at   TEXT,
+    alerted         INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_news_published ON news_items(published_at DESC);
 """
 
 
@@ -619,6 +641,25 @@ class Database:
                 f"ORDER BY fired_at DESC LIMIT ?", params).fetchall()
         return [_row(r) for r in rows]
 
+    def fired_signal(self, signal_id: int | None = None,
+                     uid: str | None = None) -> dict | None:
+        """One logged signal, by row id or by the tracked suggestion's uid.
+
+        By uid it is the newest row, because the live signal card knows only
+        the suggestion's id; a uid re-logged after a restart keeps its latest
+        life.
+        """
+        with self.connect() as conn:
+            if signal_id is not None:
+                row = conn.execute("SELECT * FROM fired_signals WHERE id = ?",
+                                   (signal_id,)).fetchone()
+            elif uid:
+                row = conn.execute("SELECT * FROM fired_signals WHERE uid = ? "
+                                   "ORDER BY fired_at DESC LIMIT 1", (uid,)).fetchone()
+            else:
+                return None
+        return _row(row) if row else None
+
     def fired_dates(self, limit: int = 60) -> list[dict]:
         """Trading days that have signals, for the tab's date picker."""
         with self.connect() as conn:
@@ -856,6 +897,74 @@ class Database:
         return _row(row) if row else None
 
     # -- alerts -------------------------------------------------------------
+
+    # -- news ----------------------------------------------------------------
+
+    def add_news(self, items: list[dict]) -> list[str]:
+        """Store headlines not seen before; return the ids that were new."""
+        now = _now()
+        new: list[str] = []
+        with self.connect() as conn:
+            for item in items:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO news_items (id, source, source_name, title, "
+                    "link, summary, published_at, seen_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (item["id"], item["source"], item.get("source_name"), item["title"],
+                     item.get("link"), item.get("summary"), item["published_at"], now))
+                if cur.rowcount:
+                    new.append(item["id"])
+        return new
+
+    def unclassified_news(self, limit: int = 20) -> list[dict]:
+        """Headlines still waiting for a model's reading, newest first.
+
+        Keyword-tagged rows count as waiting too: the keyword tag is a stand-in
+        until a model is reachable, not a final answer.
+        """
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM news_items WHERE classified_by IS NULL "
+                "OR classified_by = 'keywords' ORDER BY published_at DESC LIMIT ?",
+                (limit,)).fetchall()
+        return [_row(r) for r in rows]
+
+    def classify_news(self, news_id: str, bias: str, impact: str, reason: str,
+                      classified_by: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE news_items SET bias = ?, impact = ?, reason = ?, "
+                "classified_by = ?, classified_at = ? WHERE id = ?",
+                (bias, impact, reason, classified_by, _now(), news_id))
+
+    def mark_news_alerted(self, news_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE news_items SET alerted = 1 WHERE id = ?", (news_id,))
+
+    def recent_news(self, hours: float = 48, limit: int = 200,
+                    impact: str | None = None, bias: str | None = None) -> list[dict]:
+        since = (datetime.now(timezone.utc).timestamp() - hours * 3600)
+        since_iso = datetime.fromtimestamp(since, timezone.utc).isoformat()
+        clauses, params = ["published_at >= ?"], [since_iso]
+        if impact:
+            clauses.append("impact = ?")
+            params.append(impact)
+        if bias:
+            clauses.append("bias = ?")
+            params.append(bias)
+        params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM news_items WHERE {' AND '.join(clauses)} "
+                f"ORDER BY published_at DESC LIMIT ?", params).fetchall()
+        return [_row(r) for r in rows]
+
+    def prune_news(self, days: float = 7) -> int:
+        """Headlines are context, not a record; a week is plenty."""
+        cutoff = datetime.fromtimestamp(
+            datetime.now(timezone.utc).timestamp() - days * 86400, timezone.utc).isoformat()
+        with self.connect() as conn:
+            return conn.execute("DELETE FROM news_items WHERE published_at < ?",
+                                (cutoff,)).rowcount
 
     def add_alert(self, kind: str, message: str, payload: dict | None = None) -> int:
         with self.connect() as conn:
